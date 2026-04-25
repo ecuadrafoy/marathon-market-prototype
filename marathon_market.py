@@ -27,11 +27,17 @@ PRICE_FLOOR         = 1.0
 HEADCOUNT_SCALE     = 0.2     # how much extra runners inflate baseline expectation
 MIN_RUNNERS_PER_CO  = 3       # 1 per zone × 3 zones
 MAX_RUNNERS_PER_CO  = 15      # ~50% cap per zone × 3 zones
-BASE_EXPECTATION    = 34.4    # empirical average performance score across zones (1000-week simulation)
+# Stopgap calibration constant: empirical average performance score across all zones,
+# derived from a 1000-week headless simulation. Depends on TOTAL_RUNNERS, zone count,
+# RUNNER_SKILL_MEAN/SD, YIELD_STEEPNESS, and CONGESTION_K — recalibrate if any of
+# those change by running the headless_calibration() function at the bottom of this file.
+BASE_EXPECTATION    = 30.3    # recalibrated: headless_calibration(weeks=1000, seed=42)
 MAX_PERF_SCORE      = 150.0   # normalization ceiling for price-change formula
 DELTA_MULTIPLIER    = 10.0    # per spec
 NOISE_RANGE         = 2.0     # uniform ±2%
 SIM_PAUSE_SECS      = 0.8     # cosmetic delay during simulation
+YIELD_STEEPNESS     = 8       # quadratic zone difficulty multiplier in yield formula; raise to widen zone EV gap
+CONGESTION_K        = 0.05    # yield penalty per additional successful runner in a zone this week
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +229,53 @@ def build_monitored_allocation(runners: list[Runner], monitored_zone_name: str) 
 
 # ---------------------------------------------------------------------------
 # STEP 2 — WEEK RESOLUTION
+# Two-pass design for simultaneous resolution:
+#   Pass 1 — _roll_success()        : roll the success die for every runner
+#   (count)  _count_zone_successes() : tally successes per zone across all companies
+#   Pass 2 — _apply_yield()         : apply congestion-adjusted yield to each winner
+# resolve_runner() wraps both passes and is kept for convenience (e.g. calibration).
 # ---------------------------------------------------------------------------
-def resolve_runner(runner: Runner, zone_map: dict[str, Zone]) -> Runner:
-    """Mutates runner in-place. Looks up difficulty from zone_map via zone_name."""
+def _roll_success(runner: Runner, zone_map: dict[str, Zone]) -> None:
+    """Pass 1: roll the success die and mutate runner.success."""
     difficulty = zone_map[runner.zone_name].difficulty
     p = _clamp(runner.skill - difficulty, 0.0, 1.0)
     runner.success = random.random() < p
-    if runner.success:
-        runner.yield_value = (50.0 + runner.skill * 100.0) * (1.0 + difficulty ** 2 * 8)
+
+
+def _apply_yield(runner: Runner, zone_map: dict[str, Zone], zone_successes: int) -> None:
+    """Pass 2: compute and assign yield for a successful runner.
+
+    zone_successes: total winners in this zone this week across ALL companies.
+    Congestion factor penalises yields when many runners succeed in the same zone.
+    No-op if runner did not succeed.
+    """
+    if not runner.success:
+        return
+    difficulty = zone_map[runner.zone_name].difficulty
+    congestion_factor = 1.0 / (1.0 + zone_successes * CONGESTION_K)
+    runner.yield_value = (
+        (50.0 + runner.skill * 100.0)
+        * (1.0 + difficulty ** 2 * YIELD_STEEPNESS)
+        * congestion_factor
+    )
+
+
+def _count_zone_successes(runners: list[Runner]) -> dict[str, int]:
+    """Return total successful runners per zone name across all companies."""
+    counts: dict[str, int] = {}
+    for r in runners:
+        if r.success:
+            counts[r.zone_name] = counts.get(r.zone_name, 0) + 1
+    return counts
+
+
+def resolve_runner(runner: Runner, zone_map: dict[str, Zone], zone_successes: int = 0) -> Runner:
+    """Convenience wrapper: roll success then apply yield in one call.
+    Suitable when zone_successes is known ahead of time (e.g. calibration sims).
+    The game loop uses the explicit two-pass approach instead.
+    """
+    _roll_success(runner, zone_map)
+    _apply_yield(runner, zone_map, zone_successes)
     return runner
 
 
@@ -239,10 +284,17 @@ def compute_company_result(
     all_runners: list[Runner],
     monitored_zone_name: str,
     zone_map: dict[str, Zone],
+    zone_success_counts: dict[str, int],
 ) -> CompanyWeekResult:
+    """Apply yields to this company's runners and compute market result.
+
+    Assumes Pass 1 (_roll_success) has already been run on all_runners and
+    zone_success_counts has been computed via _count_zone_successes. This
+    function only executes Pass 2 (_apply_yield) — it does not re-roll success.
+    """
     company_runners = [r for r in all_runners if r.company_name == company.name]
     for r in company_runners:
-        resolve_runner(r, zone_map)
+        _apply_yield(r, zone_map, zone_success_counts.get(r.zone_name, 0))
 
     # Aggregate across all zones — drives price
     total = len(company_runners)
@@ -516,11 +568,15 @@ def planning_loop(
 def _print_zone_breakdown(all_runners: list[Runner], zones: list[Zone], companies: list[Company]) -> None:
     """Debug view: runner outcomes broken down by every zone."""
     print(f"\nALL ZONES BREAKDOWN  [debug]")
+    zone_success_counts = _count_zone_successes(all_runners)
     for zone in zones:
         tag = " ★ monitored" if zone.monitored else " · hidden"
         zone_runners = [r for r in all_runners if r.zone_name == zone.name]
         avg_skill = sum(r.skill for r in zone_runners) / len(zone_runners) if zone_runners else 0.0
-        print(f"  {zone.name} ({_difficulty_label(zone.difficulty)}){tag}  avg skill {avg_skill:.2f}")
+        zone_successes = zone_success_counts.get(zone.name, 0)
+        congestion_factor = 1.0 / (1.0 + zone_successes * CONGESTION_K)
+        print(f"  {zone.name} ({_difficulty_label(zone.difficulty)}){tag}  avg skill {avg_skill:.2f}"
+              f"  |  {zone_successes} successes  congestion ×{congestion_factor:.2f}")
         for company in companies:
             co_runners = [r for r in zone_runners if r.company_name == company.name]
             if not co_runners:
@@ -649,10 +705,15 @@ def run_game() -> None:
         print(f"\n  Simulating week {week}...")
         time.sleep(SIM_PAUSE_SECS)
 
-        # Resolve all runners and compute results
+        # Pass 1: roll success for every runner simultaneously
+        for r in all_runners:
+            _roll_success(r, zone_map)
+        zone_success_counts = _count_zone_successes(all_runners)
+
+        # Pass 2: apply yields with congestion, then compute market response per company
         results: list[CompanyWeekResult] = []
         for company in companies:
-            result = compute_company_result(company, all_runners, monitored_zone.name, zone_map)
+            result = compute_company_result(company, all_runners, monitored_zone.name, zone_map, zone_success_counts)
             company.price = result.price_after
             results.append(result)
 
@@ -662,6 +723,51 @@ def run_game() -> None:
         week += 1
 
     print_session_end(week, portfolio)
+
+
+def headless_calibration(weeks: int = 1000, seed: int = 42) -> float:
+    """Run a headless simulation and return the average performance score across all
+    companies and weeks. Use the result to recalibrate BASE_EXPECTATION whenever
+    TOTAL_RUNNERS, zone count, RUNNER_SKILL_MEAN/SD, YIELD_STEEPNESS, or CONGESTION_K
+    change.
+
+    Usage:
+        uv run python -c "from marathon_market import headless_calibration; print(headless_calibration())"
+    """
+    random.seed(seed)
+    companies = [
+        Company("CyberAcme", 450.0),
+        Company("Sekiguchi",  380.0),
+        Company("Traxus",     300.0),
+        Company("NuCaloric",  200.0),
+    ]
+    company_names = [c.name for c in companies]
+    zone_map = {z.name: z for z in ZONES}
+
+    total_score = 0.0
+    total_samples = 0
+
+    for _ in range(weeks):
+        all_runners = assign_runners_standard(TOTAL_RUNNERS, ZONES, company_names)
+
+        # Two-pass resolution (same logic as run_game)
+        for r in all_runners:
+            _roll_success(r, zone_map)
+        zone_success_counts = _count_zone_successes(all_runners)
+
+        for company in companies:
+            company_runners = [r for r in all_runners if r.company_name == company.name]
+            for r in company_runners:
+                _apply_yield(r, zone_map, zone_success_counts.get(r.zone_name, 0))
+            total = len(company_runners)
+            successes = sum(1 for r in company_runners if r.success)
+            success_rate = successes / total if total > 0 else 0.0
+            successful_yields = [r.yield_value for r in company_runners if r.success]
+            avg_yield = sum(successful_yields) / len(successful_yields) if successful_yields else 0.0
+            total_score += success_rate * avg_yield
+            total_samples += 1
+
+    return total_score / total_samples if total_samples > 0 else 0.0
 
 
 if __name__ == "__main__":
