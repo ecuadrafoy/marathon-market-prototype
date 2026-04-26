@@ -10,6 +10,8 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+import numpy as np
+
 from .runners import Runner, effective_capability
 from .shells import SHELL_BY_NAME
 
@@ -54,28 +56,18 @@ class EncounterReport:
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
-def _squad_capability(squad: list[Runner]) -> tuple[float, float, list[tuple[float, float, float]]]:
-    """Return (combat_total, extraction_total, per_runner_breakdown).
+def _squad_breakdown(squad: list[Runner]) -> np.ndarray:
+    """Per-runner (combat, extraction, support) effective capability matrix.
 
-    per_runner_breakdown[i] is (combat, extraction, support) for squad[i].
-    Combat total includes SUPPORT_COMBAT_BONUS contribution.
-    Extraction total is the raw sum — support amplifies yield multiplicatively
-    in `_distribute_extraction`, not via an extraction-share bonus.
+    Shape: (len(squad), 3). Row i is the (c, e, s) tuple for squad[i].
     """
-    breakdowns: list[tuple[float, float, float]] = []
-    sum_combat = 0.0
-    sum_extraction = 0.0
-    sum_support = 0.0
-    for runner in squad:
-        shell = SHELL_BY_NAME[runner.current_shell]
-        c, e, s = effective_capability(runner, shell)
-        breakdowns.append((c, e, s))
-        sum_combat += c
-        sum_extraction += e
-        sum_support += s
-    combat_total = sum_combat + SUPPORT_COMBAT_BONUS * sum_support
-    extraction_total = sum_extraction
-    return combat_total, extraction_total, breakdowns
+    return np.array([effective_capability(r, SHELL_BY_NAME[r.current_shell]) for r in squad])
+
+
+def _squad_combat(breakdown: np.ndarray) -> float:
+    """Squad combat score = sum(eff_combat) + SUPPORT_COMBAT_BONUS * sum(eff_support)."""
+    sums = breakdown.sum(axis=0)   # [combat_total, extraction_total, support_total]
+    return float(sums[0] + SUPPORT_COMBAT_BONUS * sums[2])
 
 
 # ---------------------------------------------------------------------------
@@ -107,60 +99,58 @@ def pair_squads(squads: list[list[Runner]]) -> tuple[list[tuple[list[Runner], li
 # ---------------------------------------------------------------------------
 # COMBAT & EXTRACTION
 # ---------------------------------------------------------------------------
-def _resolve_combat(squad_a: list[Runner], squad_b: list[Runner]) -> tuple[list[Runner], list[Runner], list[tuple[float, float, float]], list[tuple[float, float, float]]]:
-    """Return (winner, loser, winner_breakdowns, loser_breakdowns)."""
-    a_combat, _, a_breakdowns = _squad_capability(squad_a)
-    b_combat, _, b_breakdowns = _squad_capability(squad_b)
-    a_roll = a_combat + random.gauss(0.0, COMBAT_VARIANCE)
-    b_roll = b_combat + random.gauss(0.0, COMBAT_VARIANCE)
+def _resolve_combat(squad_a: list[Runner], squad_b: list[Runner]) -> tuple[list[Runner], list[Runner], np.ndarray, np.ndarray]:
+    """Return (winner, loser, winner_breakdown, loser_breakdown)."""
+    a_breakdown = _squad_breakdown(squad_a)
+    b_breakdown = _squad_breakdown(squad_b)
+    a_roll = _squad_combat(a_breakdown) + random.gauss(0.0, COMBAT_VARIANCE)
+    b_roll = _squad_combat(b_breakdown) + random.gauss(0.0, COMBAT_VARIANCE)
     if a_roll >= b_roll:
-        return squad_a, squad_b, a_breakdowns, b_breakdowns
-    return squad_b, squad_a, b_breakdowns, a_breakdowns
+        return squad_a, squad_b, a_breakdown, b_breakdown
+    return squad_b, squad_a, b_breakdown, a_breakdown
 
 
-def _distribute_extraction(squad: list[Runner], breakdowns: list[tuple[float, float, float]] | None = None) -> tuple[list[float], float]:
+def _distribute_extraction(breakdown: np.ndarray) -> tuple[np.ndarray, float]:
     """Compute per-runner yield. Return (per_runner_yields, squad_total_yield).
 
     Squad yield: (BASE + EXTRACTION_MULT * sum_extraction) amplified multiplicatively
     by (1 + SUPPORT_YIELD_AMPLIFIER * sum_support). Support runners boost the entire
-    squad's payoff but do not claim a personal share for their support contribution
-    — their personal share is proportional to their own eff_extraction only.
+    squad's payoff but do not claim a personal share — personal share is proportional
+    to eff_extraction only.
     """
-    if breakdowns is None:
-        _, _, breakdowns = _squad_capability(squad)
-    sum_extraction = sum(b[1] for b in breakdowns)
-    sum_support    = sum(b[2] for b in breakdowns)
-    base_yield = BASE_SQUAD_YIELD + EXTRACTION_YIELD_MULTIPLIER * sum_extraction
+    eff_extraction = breakdown[:, 1]
+    sum_extraction = eff_extraction.sum()
+    sum_support    = breakdown[:, 2].sum()
+    base_yield  = BASE_SQUAD_YIELD + EXTRACTION_YIELD_MULTIPLIER * sum_extraction
     squad_yield = base_yield * (1.0 + SUPPORT_YIELD_AMPLIFIER * sum_support)
 
-    per_runner_extraction = [b[1] for b in breakdowns]
-    total = sum(per_runner_extraction)
-    if total <= 0:
-        share = squad_yield / len(squad)
-        return [share] * len(squad), squad_yield
-    return [squad_yield * (e / total) for e in per_runner_extraction], squad_yield
+    if sum_extraction <= 0:
+        # Equal split fallback — every runner has zero eff_extraction (extreme corner case).
+        return np.full(len(breakdown), squad_yield / len(breakdown)), float(squad_yield)
+    return squad_yield * eff_extraction / sum_extraction, float(squad_yield)
 
 
-def _distribute_eliminations(losers: list[Runner], winner_breakdowns: list[tuple[float, float, float]]) -> list[int]:
-    """Eliminations scored per winning runner, proportional to their combat contribution.
+def _distribute_eliminations(losers_count: int, winner_breakdown: np.ndarray) -> np.ndarray:
+    """Eliminations scored per winning runner, proportional to combat contribution.
 
-    Total eliminations to distribute equals the loser squad size.
+    Total eliminations to distribute equals the loser squad size. Leftover from
+    integer flooring is distributed by largest fractional remainder.
     """
-    combat_contribs = [b[0] for b in winner_breakdowns]
-    total_kills = len(losers)
-    total = sum(combat_contribs)
-    if total <= 0:
-        # equal split fallback
-        base = total_kills // len(combat_contribs)
-        remainder = total_kills - base * len(combat_contribs)
-        return [base + (1 if i < remainder else 0) for i in range(len(combat_contribs))]
-    raw = [total_kills * (c / total) for c in combat_contribs]
-    floored = [int(x) for x in raw]
-    leftover = total_kills - sum(floored)
-    # distribute leftover by largest fractional remainder
-    remainders = sorted(((raw[i] - floored[i], i) for i in range(len(raw))), reverse=True)
-    for _, idx in remainders[:leftover]:
-        floored[idx] += 1
+    combat = winner_breakdown[:, 0]
+    if combat.sum() <= 0:
+        # Equal split fallback.
+        base = losers_count // len(combat)
+        floored = np.full(len(combat), base, dtype=int)
+        remainder = losers_count - base * len(combat)
+        floored[:remainder] += 1
+        return floored
+    raw = losers_count * combat / combat.sum()
+    floored = raw.astype(int)
+    leftover = losers_count - int(floored.sum())
+    if leftover > 0:
+        # Add 1 to the runners with the largest fractional remainders.
+        top_indices = np.argsort(floored - raw)[:leftover]   # ascending -> most negative remainder = largest fractional part
+        floored[top_indices] += 1
     return floored
 
 
@@ -170,21 +160,20 @@ def _distribute_eliminations(losers: list[Runner], winner_breakdowns: list[tuple
 def resolve_week(active_runners: list[Runner]) -> tuple[dict[int, WeeklyOutcome], EncounterReport]:
     """Resolve one week of encounters. Return (outcomes_by_runner_id, report).
 
-    Outcomes are produced for every runner in `active_runners` (sit-outs get a
+    Produces an outcome for every runner in `active_runners` (sit-outs get a
     'did not participate' outcome).
     """
     squads, sit_outs = form_squads(active_runners)
     pairs, uncontested = pair_squads(squads)
 
     outcomes: dict[int, WeeklyOutcome] = {}
-
     contested_records: list[tuple[list[Runner], list[Runner], list[Runner]]] = []
 
     for squad_a, squad_b in pairs:
-        winner, loser, winner_breakdowns, _loser_breakdowns = _resolve_combat(squad_a, squad_b)
+        winner, loser, winner_breakdown, _loser_breakdown = _resolve_combat(squad_a, squad_b)
         contested_records.append((squad_a, squad_b, winner))
 
-        # Losing squad: all eliminated, no extraction
+        # Losing squad: all eliminated, no extraction.
         for runner in loser:
             outcomes[runner.id] = WeeklyOutcome(
                 runner_id=runner.id,
@@ -197,36 +186,34 @@ def resolve_week(active_runners: list[Runner]) -> tuple[dict[int, WeeklyOutcome]
                 extraction_contribution=0.0,
             )
 
-        # Winning squad: extracts, scores eliminations
-        kills_per_winner = _distribute_eliminations(loser, winner_breakdowns)
-        per_runner_yields, _squad_yield = _distribute_extraction(winner, winner_breakdowns)
+        # Winning squad: extracts, scores eliminations.
+        kills = _distribute_eliminations(len(loser), winner_breakdown)
+        yields, _ = _distribute_extraction(winner_breakdown)
         for idx, runner in enumerate(winner):
-            c, e, s = winner_breakdowns[idx]
             outcomes[runner.id] = WeeklyOutcome(
                 runner_id=runner.id,
                 participated=True,
                 survived=True,
                 extracted=True,
-                eliminations_scored=kills_per_winner[idx],
-                yield_received=per_runner_yields[idx],
-                combat_contribution=c,
-                extraction_contribution=e,
+                eliminations_scored=int(kills[idx]),
+                yield_received=float(yields[idx]),
+                combat_contribution=float(winner_breakdown[idx, 0]),
+                extraction_contribution=float(winner_breakdown[idx, 1]),
             )
 
     for squad in uncontested:
-        per_runner_yields, _squad_yield = _distribute_extraction(squad)
-        _, _, breakdowns = _squad_capability(squad)
+        breakdown = _squad_breakdown(squad)
+        yields, _ = _distribute_extraction(breakdown)
         for idx, runner in enumerate(squad):
-            c, e, s = breakdowns[idx]
             outcomes[runner.id] = WeeklyOutcome(
                 runner_id=runner.id,
                 participated=True,
                 survived=True,
                 extracted=True,
                 eliminations_scored=0,
-                yield_received=per_runner_yields[idx],
-                combat_contribution=c,
-                extraction_contribution=e,
+                yield_received=float(yields[idx]),
+                combat_contribution=float(breakdown[idx, 0]),
+                extraction_contribution=float(breakdown[idx, 1]),
             )
 
     for runner in sit_outs:

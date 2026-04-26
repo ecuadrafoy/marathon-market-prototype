@@ -15,6 +15,8 @@ the consciousness persists.
 from __future__ import annotations
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from .shells import Shell, SHELL_BY_NAME, SHELL_ROSTER
 
 
@@ -71,13 +73,19 @@ class Runner:
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
+def _runner_attrs(runner: Runner) -> np.ndarray:
+    """Return runner's (combat, extraction, support) as a 3-vector."""
+    return np.array([runner.combat, runner.extraction, runner.support])
+
+
+def _shell_affinity_vec(shell: Shell) -> np.ndarray:
+    """Return shell's (combat_affinity, extraction_affinity, support_affinity) as a 3-vector."""
+    return np.array([shell.combat_affinity, shell.extraction_affinity, shell.support_affinity])
 
 
 def _affinity_score(runner: Runner, shell_name: str) -> float:
     raw = runner.shell_affinities.get(shell_name, 0.0)
-    return max(AFFINITY_FLOOR, _clamp(raw, 0.0, AFFINITY_CAP))
+    return float(np.clip(max(AFFINITY_FLOOR, raw), 0.0, AFFINITY_CAP))
 
 
 def extraction_success_rate(runner: Runner) -> float:
@@ -96,13 +104,8 @@ def effective_capability(runner: Runner, shell: Shell) -> tuple[float, float, fl
         effective_X = (runner.X * RUNNER_WEIGHT + shell.X_affinity * SHELL_WEIGHT)
                       * shell_affinity_score
     """
-    affinity_score = _affinity_score(runner, shell.name)
-
-    eff_combat     = (runner.combat     * RUNNER_WEIGHT + shell.combat_affinity     * SHELL_WEIGHT) * affinity_score
-    eff_extraction = (runner.extraction * RUNNER_WEIGHT + shell.extraction_affinity * SHELL_WEIGHT) * affinity_score
-    eff_support    = (runner.support    * RUNNER_WEIGHT + shell.support_affinity    * SHELL_WEIGHT) * affinity_score
-
-    return eff_combat, eff_extraction, eff_support
+    eff = (_runner_attrs(runner) * RUNNER_WEIGHT + _shell_affinity_vec(shell) * SHELL_WEIGHT) * _affinity_score(runner, shell.name)
+    return float(eff[0]), float(eff[1]), float(eff[2])
 
 
 # ---------------------------------------------------------------------------
@@ -121,14 +124,10 @@ def choose_best_shell(runner: Runner, shells: list[Shell]) -> Shell:
     shell has a higher affinity score there, making that shell more attractive
     until alignment elsewhere is decisively better.
     """
+    attrs = _runner_attrs(runner)
     def weighted_capability(shell: Shell) -> float:
-        affinity_score = _affinity_score(runner, shell.name)
-        inner = (
-            runner.combat     * (runner.combat     * RUNNER_WEIGHT + shell.combat_affinity     * SHELL_WEIGHT)
-            + runner.extraction * (runner.extraction * RUNNER_WEIGHT + shell.extraction_affinity * SHELL_WEIGHT)
-            + runner.support  * (runner.support    * RUNNER_WEIGHT + shell.support_affinity    * SHELL_WEIGHT)
-        )
-        return inner * affinity_score
+        inner_axes = attrs * (attrs * RUNNER_WEIGHT + _shell_affinity_vec(shell) * SHELL_WEIGHT)
+        return float(inner_axes.sum() * _affinity_score(runner, shell.name))
     return max(shells, key=weighted_capability)
 
 
@@ -144,8 +143,8 @@ def switch_shell(runner: Runner, new_shell_name: str) -> bool:
 # DRIFT & AFFINITY
 # ---------------------------------------------------------------------------
 def gain_affinity(runner: Runner, shell_name: str, base_amount: float = AFFINITY_PER_WEEK) -> None:
-    new_value = runner.shell_affinities.get(shell_name, 0.0) + base_amount
-    runner.shell_affinities[shell_name] = _clamp(new_value, 0.0, AFFINITY_CAP)
+    raw = runner.shell_affinities.get(shell_name, 0.0) + base_amount
+    runner.shell_affinities[shell_name] = float(np.clip(raw, 0.0, AFFINITY_CAP))
 
 
 def drift_attributes(runner: Runner, shell: Shell, rate: float = ATTRIBUTE_DRIFT_RATE) -> None:
@@ -153,8 +152,7 @@ def drift_attributes(runner: Runner, shell: Shell, rate: float = ATTRIBUTE_DRIFT
     affinity vector. Sum stays at 1.0 because both the current attributes and the shell
     affinities sum to 1.0, so the per-axis deltas sum to 0.
 
-        new_X = old_X + rate * (shell.X_affinity - old_X)
+        new = old + rate * (target - old)
     """
-    runner.combat     += rate * (shell.combat_affinity     - runner.combat)
-    runner.extraction += rate * (shell.extraction_affinity - runner.extraction)
-    runner.support    += rate * (shell.support_affinity    - runner.support)
+    new = _runner_attrs(runner) + rate * (_shell_affinity_vec(shell) - _runner_attrs(runner))
+    runner.combat, runner.extraction, runner.support = float(new[0]), float(new[1]), float(new[2])
