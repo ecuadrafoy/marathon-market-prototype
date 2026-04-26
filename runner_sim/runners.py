@@ -6,11 +6,14 @@ continuous (combat, extraction, support) attribute vector summing to 1.0.
 Match results pull this vector toward the affinity profile of the shell the
 runner is currently wearing — so specialization emerges from shell exposure
 over time, with one attribute growing at the expense of the others.
+
+Death is a stat counter, not a state — a runner whose squad loses combat is
+respawned in a fresh shell next week. The bio-synthetic body is replaceable;
+the consciousness persists.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from enum import Enum
 
 from .shells import Shell, SHELL_BY_NAME, SHELL_ROSTER
 
@@ -32,14 +35,6 @@ assert abs((RUNNER_WEIGHT + SHELL_WEIGHT) - 1.0) < 1e-9, "RUNNER_WEIGHT + SHELL_
 
 
 # ---------------------------------------------------------------------------
-# ENUMS
-# ---------------------------------------------------------------------------
-class Status(str, Enum):
-    ACTIVE = "active"
-    RECOVERING = "recovering"
-
-
-# ---------------------------------------------------------------------------
 # DATA STRUCTURES
 # ---------------------------------------------------------------------------
 @dataclass
@@ -56,16 +51,13 @@ class Runner:
 
     # --- state (changes week to week) ---
     current_shell: str
-    status: Status = Status.ACTIVE
-    recovery_weeks_left: int = 0
 
     # --- capability bookkeeping ---
     shell_affinities: dict[str, float] = field(default_factory=lambda: {s.name: 0.0 for s in SHELL_ROSTER})
 
     # --- per-week shell record ---
-    # One entry per simulated week. Stores the shell name on weeks the runner was
-    # active, or "-" on weeks they were recovering. Indexed: shell_history[i]
-    # corresponds to week i+1.
+    # One entry per simulated week — the shell name the runner used in that week's
+    # encounter. Indexed: shell_history[i] corresponds to week i+1.
     shell_history: list[str] = field(default_factory=list)
 
     # --- pure leaderboard stats (no longer feed back into capability) ---
@@ -149,7 +141,7 @@ def switch_shell(runner: Runner, new_shell_name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# LIFECYCLE
+# DRIFT & AFFINITY
 # ---------------------------------------------------------------------------
 def gain_affinity(runner: Runner, shell_name: str, base_amount: float = AFFINITY_PER_WEEK) -> None:
     new_value = runner.shell_affinities.get(shell_name, 0.0) + base_amount
@@ -166,21 +158,3 @@ def drift_attributes(runner: Runner, shell: Shell, rate: float = ATTRIBUTE_DRIFT
     runner.combat     += rate * (shell.combat_affinity     - runner.combat)
     runner.extraction += rate * (shell.extraction_affinity - runner.extraction)
     runner.support    += rate * (shell.support_affinity    - runner.support)
-
-
-def enter_recovery(runner: Runner, weeks: int) -> None:
-    runner.death_count += 1
-    runner.status = Status.RECOVERING
-    runner.recovery_weeks_left = weeks
-
-
-def tick_recovery(runner: Runner) -> bool:
-    """Decrement recovery counter. Return True if the runner re-enters active duty this week."""
-    if runner.status != Status.RECOVERING:
-        return False
-    runner.recovery_weeks_left -= 1
-    if runner.recovery_weeks_left <= 0:
-        runner.status = Status.ACTIVE
-        runner.recovery_weeks_left = 0
-        return True
-    return False

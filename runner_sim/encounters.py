@@ -19,10 +19,12 @@ from .shells import SHELL_BY_NAME
 # ---------------------------------------------------------------------------
 SQUAD_SIZE                  = 3
 SUPPORT_COMBAT_BONUS        = 0.5
-SUPPORT_EXTRACTION_BONUS    = 0.5
 COMBAT_VARIANCE             = 0.15   # gaussian sigma applied to each squad's combat roll
 BASE_SQUAD_YIELD            = 100.0  # baseline yield for an extraction before scaling by capability
 EXTRACTION_YIELD_MULTIPLIER = 200.0  # additional yield scaled by squad's effective extraction
+SUPPORT_YIELD_AMPLIFIER     = 0.5    # support multiplies whole-squad yield: yield *= (1 + amp * sum_support)
+                                     # Support runners boost team yield but earn personal share only
+                                     # in proportion to their own eff_extraction.
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +59,8 @@ def _squad_capability(squad: list[Runner]) -> tuple[float, float, list[tuple[flo
 
     per_runner_breakdown[i] is (combat, extraction, support) for squad[i].
     Combat total includes SUPPORT_COMBAT_BONUS contribution.
-    Extraction total includes SUPPORT_EXTRACTION_BONUS contribution.
+    Extraction total is the raw sum — support amplifies yield multiplicatively
+    in `_distribute_extraction`, not via an extraction-share bonus.
     """
     breakdowns: list[tuple[float, float, float]] = []
     sum_combat = 0.0
@@ -71,7 +74,7 @@ def _squad_capability(squad: list[Runner]) -> tuple[float, float, list[tuple[flo
         sum_extraction += e
         sum_support += s
     combat_total = sum_combat + SUPPORT_COMBAT_BONUS * sum_support
-    extraction_total = sum_extraction + SUPPORT_EXTRACTION_BONUS * sum_support
+    extraction_total = sum_extraction
     return combat_total, extraction_total, breakdowns
 
 
@@ -116,16 +119,23 @@ def _resolve_combat(squad_a: list[Runner], squad_b: list[Runner]) -> tuple[list[
 
 
 def _distribute_extraction(squad: list[Runner], breakdowns: list[tuple[float, float, float]] | None = None) -> tuple[list[float], float]:
-    """Compute per-runner yield. Return (per_runner_yields, squad_total_yield)."""
+    """Compute per-runner yield. Return (per_runner_yields, squad_total_yield).
+
+    Squad yield: (BASE + EXTRACTION_MULT * sum_extraction) amplified multiplicatively
+    by (1 + SUPPORT_YIELD_AMPLIFIER * sum_support). Support runners boost the entire
+    squad's payoff but do not claim a personal share for their support contribution
+    — their personal share is proportional to their own eff_extraction only.
+    """
     if breakdowns is None:
         _, _, breakdowns = _squad_capability(squad)
-    extraction_total = sum(b[1] for b in breakdowns) + SUPPORT_EXTRACTION_BONUS * sum(b[2] for b in breakdowns)
-    squad_yield = BASE_SQUAD_YIELD + EXTRACTION_YIELD_MULTIPLIER * extraction_total
+    sum_extraction = sum(b[1] for b in breakdowns)
+    sum_support    = sum(b[2] for b in breakdowns)
+    base_yield = BASE_SQUAD_YIELD + EXTRACTION_YIELD_MULTIPLIER * sum_extraction
+    squad_yield = base_yield * (1.0 + SUPPORT_YIELD_AMPLIFIER * sum_support)
 
-    per_runner_extraction = [b[1] + SUPPORT_EXTRACTION_BONUS * b[2] for b in breakdowns]
+    per_runner_extraction = [b[1] for b in breakdowns]
     total = sum(per_runner_extraction)
     if total <= 0:
-        # equal split fallback
         share = squad_yield / len(squad)
         return [share] * len(squad), squad_yield
     return [squad_yield * (e / total) for e in per_runner_extraction], squad_yield
@@ -200,7 +210,7 @@ def resolve_week(active_runners: list[Runner]) -> tuple[dict[int, WeeklyOutcome]
                 eliminations_scored=kills_per_winner[idx],
                 yield_received=per_runner_yields[idx],
                 combat_contribution=c,
-                extraction_contribution=e + SUPPORT_EXTRACTION_BONUS * s,
+                extraction_contribution=e,
             )
 
     for squad in uncontested:
@@ -216,7 +226,7 @@ def resolve_week(active_runners: list[Runner]) -> tuple[dict[int, WeeklyOutcome]
                 eliminations_scored=0,
                 yield_received=per_runner_yields[idx],
                 combat_contribution=c,
-                extraction_contribution=e + SUPPORT_EXTRACTION_BONUS * s,
+                extraction_contribution=e,
             )
 
     for runner in sit_outs:

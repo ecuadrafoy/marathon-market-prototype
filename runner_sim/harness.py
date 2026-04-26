@@ -17,14 +17,11 @@ import sys
 from .encounters import EncounterReport, WeeklyOutcome, resolve_week
 from .runners import (
     Runner,
-    Status,
     choose_best_shell,
     drift_attributes,
-    enter_recovery,
     extraction_success_rate,
     gain_affinity,
     switch_shell,
-    tick_recovery,
 )
 from .shells import SHELL_BY_NAME, SHELL_ROSTER
 
@@ -36,13 +33,10 @@ if hasattr(sys.stdout, "reconfigure"):
 # ---------------------------------------------------------------------------
 # TUNABLE CONSTANTS
 # ---------------------------------------------------------------------------
-POOL_SIZE       = 30
-TEST_WEEKS      = 25
-RECOVERY_WEEKS  = 3
+POOL_SIZE  = 30
+TEST_WEEKS = 25
 
 COMPANY_NAMES: tuple[str, ...] = ("Aegis", "Helix", "Vector")
-
-RECOVERY_HISTORY_MARKER = "-"   # placeholder in shell_history for weeks the runner was recovering
 
 # Flavor names for runner identities — purely cosmetic
 NAME_POOL: tuple[str, ...] = (
@@ -86,7 +80,11 @@ def create_runner_pool(size: int) -> list[Runner]:
 
 
 def apply_outcome(runner: Runner, outcome: WeeklyOutcome) -> None:
-    """Update career stats and drift attributes from a weekly outcome."""
+    """Update career stats and drift attributes from a weekly outcome.
+
+    Death is a stat counter — the runner respawns next week in whatever shell
+    the AI picks for them. No state transition, no time off.
+    """
     if not outcome.participated:
         return
 
@@ -100,9 +98,7 @@ def apply_outcome(runner: Runner, outcome: WeeklyOutcome) -> None:
         gain_affinity(runner, runner.current_shell)
         drift_attributes(runner, SHELL_BY_NAME[runner.current_shell])
     else:
-        enter_recovery(runner, RECOVERY_WEEKS)
-        # Shell selection happens at the start of each week, so we don't re-roll here.
-        # Current shell stays as a placeholder; the runner will reassess on activation.
+        runner.death_count += 1
 
 
 # ---------------------------------------------------------------------------
@@ -151,13 +147,6 @@ def _print_shell_switches(switches: list[tuple[Runner, str, str]]) -> None:
     print(f"\n[Shell switches] {' | '.join(parts)}")
 
 
-def _print_recoveries(pool: list[Runner]) -> None:
-    recovering = [r for r in pool if r.status == Status.RECOVERING]
-    if recovering:
-        names = ", ".join(f"{r.name}(R{r.recovery_weeks_left})" for r in recovering)
-        print(f"\n[Recovering this week] {names}")
-
-
 def print_initial_pool(pool: list[Runner]) -> None:
     """Dump the starting roster — random profiles before any week is played.
 
@@ -204,48 +193,32 @@ def run_simulation(weeks: int, pool_size: int, seed: int | None, quiet: bool, pr
         print_initial_pool(pool)
 
     for week in range(1, weeks + 1):
-        # Tick recoveries first — runners returning this week are eligible.
-        for runner in pool:
-            tick_recovery(runner)
-
-        active = [r for r in pool if r.status == Status.ACTIVE]
-        if not active:
-            for runner in pool:
-                runner.shell_history.append(RECOVERY_HISTORY_MARKER)
-            if not quiet:
-                print(f"\n=== Week {week:02d} === All runners recovering. Skipped.")
-            continue
-
-        # Shell selection: each runner picks the shell that maximizes their
-        # attribute-weighted effective capability this week. Skipped on week 1
-        # so the random starting shell is the one actually played — gives the
+        # All runners participate every week — death is a stat counter, not a
+        # state. Shell selection: each runner picks the shell that maximizes
+        # their attribute-weighted effective capability. Skipped on week 1 so
+        # the random starting shell is the one actually played — gives the
         # timeline an observable "natural starting state" before the AI kicks in.
         switches: list[tuple[Runner, str, str]] = []
         if week > 1:
-            for runner in active:
+            for runner in pool:
                 previous = runner.current_shell
                 best = choose_best_shell(runner, SHELL_ROSTER)
                 if switch_shell(runner, best.name):
                     switches.append((runner, previous, best.name))
 
-        # Record shell history for the week — active runners get their chosen
-        # shell, recovering runners get the marker. Done after shell selection
-        # so the recorded shell is the one used in this week's encounters.
+        # Record shell history for the week, after shell selection so the entry
+        # reflects the shell used in this week's encounters.
         for runner in pool:
-            if runner.status == Status.ACTIVE:
-                runner.shell_history.append(runner.current_shell)
-            else:
-                runner.shell_history.append(RECOVERY_HISTORY_MARKER)
+            runner.shell_history.append(runner.current_shell)
 
-        outcomes, report = resolve_week(active)
+        outcomes, report = resolve_week(pool)
 
-        for runner in active:
+        for runner in pool:
             apply_outcome(runner, outcomes[runner.id])
 
         if not quiet:
             _print_week(week, report, outcomes)
             _print_shell_switches(switches)
-            _print_recoveries(pool)
 
     return pool
 
@@ -278,27 +251,21 @@ def print_leaderboard(pool: list[Runner]) -> None:
 
 
 def _shell_history_string(runner: Runner) -> str:
-    """Render the runner's per-week shell record as a single-letter string.
-    Each character is the shell's `code` for that week, or RECOVERY_HISTORY_MARKER
-    for recovery weeks.
+    """Render the runner's per-week shell record as a single-letter string,
+    one character per week using each shell's `code`.
     """
     parts: list[str] = []
     for entry in runner.shell_history:
-        if entry == RECOVERY_HISTORY_MARKER:
-            parts.append(RECOVERY_HISTORY_MARKER)
-        else:
-            shell = SHELL_BY_NAME.get(entry)
-            parts.append(shell.code if shell else "?")
+        shell = SHELL_BY_NAME.get(entry)
+        parts.append(shell.code if shell else "?")
     return "".join(parts)
 
 
 def _shell_switch_count(runner: Runner) -> int:
-    """Count how many times the runner switched shells across active weeks (recovery weeks ignored)."""
+    """Count how many times the runner switched shells across the recorded weeks."""
     last: str | None = None
     switches = 0
     for entry in runner.shell_history:
-        if entry == RECOVERY_HISTORY_MARKER:
-            continue
         if last is not None and entry != last:
             switches += 1
         last = entry
@@ -308,8 +275,8 @@ def _shell_switch_count(runner: Runner) -> int:
 def print_shell_histories(pool: list[Runner]) -> None:
     """One-line-per-runner per-week shell timeline.
 
-    Each character: a shell code (D/A/V/T/R/G/K) or '-' for a recovery week.
-    Sorted by leaderboard rank (net loot descending) for readability.
+    Each character is a shell code (D/A/V/T/R/G/K). Sorted by leaderboard rank
+    (net loot descending) for readability.
     """
     ranked = sorted(pool, key=lambda r: r.net_loot, reverse=True)
     legend = "  ".join(f"{s.code}={s.name}" for s in SHELL_ROSTER)
@@ -317,7 +284,7 @@ def print_shell_histories(pool: list[Runner]) -> None:
     header = f"{'Rank':>4}  {'Name':<10}  {'Sw':>3}  Timeline"
     print("\n" + "=" * 80)
     print("PER-WEEK SHELL HISTORY")
-    print(f"Legend: {legend}    -=Recovery")
+    print(f"Legend: {legend}")
     print("=" * 80)
     print(header)
     print("-" * 80)
