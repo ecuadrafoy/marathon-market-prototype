@@ -265,9 +265,44 @@ This is documented behaviour, not a bug. Making the middle shells viable
 requires either (a) different scoring (e.g. a quadratic bonus for balance,
 which would change the model's character significantly), (b) shell-specific
 mechanical roles outside the affinity vector (Recon gives intel, Rook
-extracts on combat losses, etc.), or (c) faster attribute drift so runners
+extracts on combat losses, etc.), (c) faster attribute drift so runners
 who start balanced *stay* balanced and find Vandal/Recon to be their best
-fit before the simplex drift pulls them to an extreme.
+fit before the simplex drift pulls them to an extreme, or (d) the planned
+market-pricing solution described below.
+
+### Planned resolution: shell pricing under market demand
+
+The dominance problem is currently *capability-only* — `choose_best_shell`
+maximises effective capability without considering cost. Once the runner
+sim is integrated with the market layer, shells become procurement assets
+with prices that scale with demand. The AI's objective shifts from
+"maximise capability" to "maximise profit" — capability-driven yield share
+minus shell cost.
+
+At market equilibrium:
+
+- Destroyer / Thief / Triage command premium prices because the
+  capability-only AI wants them. High demand drives cost up.
+- Vandal / Assassin / Recon / Rook stay cheap precisely because the
+  capability-only AI ignores them — low demand keeps cost down.
+- The marginal runner is indifferent between an expensive popular shell
+  and a cheap niche shell. Some runners push into the middle four because
+  the cost discount more than offsets the capability loss.
+
+Shell diversity emerges as a property of price competition, without buffing
+middle shells artificially or rewriting the capability formula. The
+capability math stays clean — it just composes with a price layer.
+
+This also fits the Marathon lore: shells are scarce bio-synthetic assets
+companies allocate, not infinite-supply equipment. The current model
+treating them as free-and-unlimited is an isolation-prototype simplification
+that goes away once the market layer connects.
+
+**Not implemented in the runner_sim track.** The runner sim deliberately
+isolates the runner ecosystem from market forces. The pricing mechanism
+is a market-layer concern that will resolve the middle-shell dominance
+when the two tracks integrate. Until then, the strict-dominance behaviour
+in this prototype is expected and intentional.
 
 ---
 
@@ -427,8 +462,11 @@ tuple) should remain stable as internals evolve — the encounter layer in
 
 - Should `ATTRIBUTE_DRIFT_RATE` be calibrated empirically (à la
   `BASE_EXPECTATION` in the market layer) or left as a tuning knob?
-- Are middle shells worth resurrecting, and via which mechanism (scoring
-  change, mechanical roles, slower drift)?
+- Middle-shell viability has a planned mechanism (market pricing under
+  demand — see the "Known Property" section). Open question is only
+  whether that's enough on its own, or if it should be combined with
+  shell-specific mechanical roles (Recon's intel, Rook's loss-loot etc.)
+  for additional differentiation beyond pure cost arbitrage.
 - Should the AI be partially randomised (softmax over `weighted_capability`
   instead of argmax) to introduce shell variety naturally? Tradeoff: less
   deterministic, harder to reason about; pro: middle shells get occasional
