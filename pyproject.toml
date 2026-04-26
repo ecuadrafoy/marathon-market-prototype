@@ -5,4 +5,5 @@ description = "Marathon Market Simulator — Python prototype"
 requires-python = ">=3.10"
 dependencies = [
     "matplotlib>=3.10.8",
+    "numpy>=2.0",
 ]
