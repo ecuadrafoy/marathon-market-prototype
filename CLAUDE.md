@@ -43,7 +43,7 @@ All simulation logic lives in `marathon_market.py`. `charts.py` imports from it 
 ```python
 yield_value = (50 + skill * 100) * (1 + difficulty**2 * 8)
 ```
-The quadratic multiplier is intentional — see `yield_design.md` for the EV analysis that motivated it. The `8` coefficient is the primary tuning lever for zone risk/reward balance.
+The quadratic multiplier is intentional — see `docs/yield_design.md` for the EV analysis that motivated it. The `8` coefficient is the primary tuning lever for zone risk/reward balance.
 
 **Tunable constants** are grouped at the top of `marathon_market.py` under `TUNABLE CONSTANTS`. `BASE_EXPECTATION` (34.4) is empirically derived from a 1000-week simulation — recalibrate it if zone count, runner count, or the yield formula changes significantly.
 
