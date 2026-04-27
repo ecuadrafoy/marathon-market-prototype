@@ -75,6 +75,26 @@ uv run python -m runner_sim --weeks 40 --pool 30 --seed 42 --quiet --print-histo
 
 ---
 
+### `squad_analysis.py` — Squad composition win-rate analysis
+
+Monte Carlo analysis of every possible SQUAD_SIZE-shell composition drawn from the full
+roster. Each composition is simulated against randomly drawn opponents and ranked by win
+rate. Outputs a ranked terminal table and saves `squad_win_rates.png`.
+
+```bash
+uv run python squad_analysis.py
+```
+
+No flags. Tune the constants at the top of the file:
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `TRIALS_PER_COMP` | `10_000` | Trials per composition against random opponents. |
+| `RANDOM_SEED` | `42` | Seed for reproducibility. |
+| `AFFINITY_SCORE` | `AFFINITY_FLOOR` | Runner affinity applied uniformly. Swap to `1.0` to model veteran runners. Relative ranking is stable regardless of value. |
+
+---
+
 ### `headless_calibration()` — BASE_EXPECTATION recalibration
 
 Runs a headless 1000-week simulation and returns the average performance score used to
