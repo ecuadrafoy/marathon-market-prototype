@@ -158,24 +158,6 @@ def _build_perception(squad: Squad, tick: int, max_ticks: int) -> SquadPerceptio
     )
 
 
-# ---------------------------------------------------------------------------
-# LOGGING HELPERS
-# ---------------------------------------------------------------------------
-def _log_squad_composition(squad: Squad, log: list[str]) -> None:
-    """Append a per-runner capability breakdown for a squad at zone entry."""
-    breakdown = _squad_breakdown(squad.runners)
-    squad_cbt  = _squad_combat(breakdown)
-    squad_ext  = float(breakdown[:, 1].sum())
-    log.append(f"[T0] {squad.name} ({squad.doctrine.value.upper()}) runners:")
-    for runner, row in zip(squad.runners, breakdown):
-        eff_cbt, eff_ext = float(row[0]), float(row[1])
-        log.append(
-            f"[T0]   {runner.name:<10} {runner.current_shell:<10} "
-            f"C:{runner.combat:.2f} E:{runner.extraction:.2f} S:{runner.support:.2f}  "
-            f"eff_cbt:{eff_cbt:.3f}  eff_ext:{eff_ext:.3f}"
-        )
-    log.append(f"[T0]   → squad combat:{squad_cbt:.3f}  squad extraction:{squad_ext:.3f}")
-
 
 # ---------------------------------------------------------------------------
 # TICK PHASES
@@ -347,8 +329,6 @@ def run_zone(
     log.append(_format_pool_spawn(pool))
     squad_summary = ", ".join(f"{s.name}({s.doctrine.value.upper()})" for s in squads)
     log.append(f"[T0] {len(squads)} squads enter: {squad_summary}")
-    for squad in squads:
-        _log_squad_composition(squad, log)
 
     for tick in range(1, max_ticks + 1):
         # Phase 1: Exploration
