@@ -429,6 +429,40 @@ def planning_loop(
 # ---------------------------------------------------------------------------
 # RESULTS UI
 # ---------------------------------------------------------------------------
+def _print_all_zones_breakdown(zone_results, monitored_zone: Zone) -> None:
+    """Debug view: per-squad outcomes for every zone, including hidden ones.
+
+    Each zone shows pool start→end and a row per squad with company prefix,
+    doctrine, status, items extracted, credits, and per-week kill count
+    (computed from the zone's combat_events).
+    """
+    print(f"\nALL ZONES BREAKDOWN  [debug]")
+    for zone_name, zr in zone_results.items():
+        is_monitored = zone_name == monitored_zone.name
+        tag = " ★ monitored" if is_monitored else " · hidden"
+        # Difficulty label not on ZoneRunResult, look it up
+        zone_obj = next(z for z in ZONES if z.name == zone_name)
+        print(f"\n▸ {zone_name}  ({_difficulty_label(zone_obj.difficulty)}){tag}  "
+              f"pool {zr.pool_size_at_start} → {zr.pool_size_at_end}")
+        for sq in zr.squads:
+            # Per-week kills: sum loser_runner_count from combat_events where this squad won
+            kills = sum(
+                ev.loser_runner_count
+                for ev in zr.combat_events
+                if ev.winner_squad == sq.name
+            )
+            if sq.extracted:
+                status = "extracted "
+                detail = f"{len(sq.loot.items):>2} items, {sq.loot.total_credits():>5}cr, {kills} kills"
+            elif sq.eliminated:
+                status = "ELIMINATED"
+                detail = "— squad wiped —"
+            else:
+                status = "stranded  "
+                detail = f"{len(sq.loot.items):>2} items (unrecovered)"
+            print(f"  {sq.name:<16} {sq.doctrine.value.upper():<8} {status}   {detail}")
+
+
 def print_results(
     results: list[CompanyWeekResult],
     monitored_zone: Zone,
@@ -437,6 +471,7 @@ def print_results(
     companies: list[Company],
     rosters,
     market,
+    zone_results = None,
     debug: bool = False,
 ) -> None:
     print(f"\n{DIVIDER}")
@@ -463,8 +498,11 @@ def print_results(
         print(f"  {r.company_name:<12} {r.price_before:>7.1f} → {r.price_after:>7.1f} cr  "
               f"({_fmt_pct(r.price_change_pct):>7})  [{label}]")
 
-    # Debug-only: per-zone shell market state
+    # Debug-only sections
     if debug:
+        if zone_results is not None:
+            _print_all_zones_breakdown(zone_results, monitored_zone)
+
         print(f"\nSHELL MARKET  [debug]")
         for shell, price in sorted(market.prices.items(), key=lambda kv: -kv[1]):
             print(f"  {shell:<10} {price:>6.1f} cr")
@@ -556,20 +594,20 @@ def run_game() -> None:
 
         # Run one week through the integrated stack
         company_prices = _prices_dict(companies)
-        results = simulate_week(rosters, market, ZONES, item_catalog, company_prices=company_prices)
+        sim_result = simulate_week(rosters, market, ZONES, item_catalog, company_prices=company_prices)
 
         # Push price changes back into Company objects
-        for r in results:
+        for r in sim_result.company_results:
             for c in companies:
                 if c.name == r.company_name:
                     c.price = r.price_after
 
         print_results(
-            results, monitored_zone, portfolio, value_before, companies,
-            rosters, market, debug,
+            sim_result.company_results, monitored_zone, portfolio, value_before, companies,
+            rosters, market, sim_result.zone_results, debug,
         )
 
-        last_results = results
+        last_results = sim_result.company_results
         week += 1
 
     print_session_end(week, portfolio, _prices_dict(companies))

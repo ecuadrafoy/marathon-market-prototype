@@ -90,8 +90,8 @@ def headless_calibration(weeks: int = 1000, seed: int = 42) -> tuple[float, floa
 
     per_company_credits: list[float] = []
     for _ in range(weeks):
-        results = simulate_week(rosters, market, ZONES, item_catalog)
-        per_company_credits.extend(r.total_credits_extracted for r in results)
+        result = simulate_week(rosters, market, ZONES, item_catalog)
+        per_company_credits.extend(r.total_credits_extracted for r in result.company_results)
 
     mean = statistics.mean(per_company_credits)
     stdev = statistics.stdev(per_company_credits)

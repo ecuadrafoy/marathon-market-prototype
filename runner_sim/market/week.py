@@ -14,6 +14,8 @@ The split between simulate_week (orchestration) and apply_zone_outcome
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
+
 import numpy as np
 
 from runner_sim.runners import (
@@ -48,6 +50,21 @@ from runner_sim.zone_sim.sim import (
     run_zone,
 )
 from runner_sim.zone_sim.zones import Zone
+
+
+# ---------------------------------------------------------------------------
+# RESULT BUNDLE
+# ---------------------------------------------------------------------------
+@dataclass
+class WeekSimulationResult:
+    """Bundle of everything produced by one call to simulate_week.
+
+    company_results is the player-facing summary (asymmetric — only monitored
+    zone is named). zone_results is the full engine state including hidden
+    zones; intended for debug display, charts, and analysis.
+    """
+    company_results: list["CompanyWeekResult"]
+    zone_results: dict[str, ZoneRunResult]
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +237,7 @@ def simulate_week(
     zones: list[Zone],
     item_catalog: list[Item],
     company_prices: dict[str, float] | None = None,
-) -> list[CompanyWeekResult]:
+) -> WeekSimulationResult:
     """Run one full week of the integrated simulation.
 
     Args:
@@ -233,7 +250,9 @@ def simulate_week(
                         company's price_before is set to 0.0 (calibration mode).
 
     Returns:
-        list of CompanyWeekResult — one per company, in roster iteration order.
+        WeekSimulationResult containing the player-facing company_results
+        and the engine-internal zone_results (full ZoneRunResult per zone,
+        including match_log and combat_events).
     """
     # --- 1. Build per-zone deployment lists ---
     deployments: dict[str, list[tuple[str, Squad]]] = {z.name: [] for z in zones}
@@ -283,4 +302,4 @@ def simulate_week(
     # --- 6. Update shell market based on new (post-recruitment) adoption ---
     update_prices(market, all_runners(rosters))
 
-    return results
+    return WeekSimulationResult(company_results=results, zone_results=zone_results)
