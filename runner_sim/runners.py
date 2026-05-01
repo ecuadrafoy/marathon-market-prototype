@@ -69,6 +69,10 @@ class Runner:
     eliminations: int = 0
     death_count: int = 0
 
+    # --- spending budget (debited on shell purchase at recruitment;
+    #     credited weekly by per-runner extraction credit share) ---
+    credit_balance: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # HELPERS

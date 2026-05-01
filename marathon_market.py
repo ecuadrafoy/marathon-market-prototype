@@ -1,93 +1,53 @@
 """
 Marathon Market Simulator — Python Prototype
 Console-only. Run: uv run python marathon_market.py
-Debug mode (shows all zones): uv run python marathon_market.py --debug
+Debug mode (shows all zones + shell market): uv run python marathon_market.py --debug
+
+This is the player-facing entry point. All week-simulation mechanics
+(rosters, squads, zone runs, shell market, price math) live in
+runner_sim.market — this file just orchestrates the loop and renders
+the UI.
 """
 
 from __future__ import annotations
-import io
 import random
 import sys
 import time
 from dataclasses import dataclass, field
 
+from runner_sim.market.calibration import (
+    DEFAULT_COMPANY_NAMES,
+    bootstrap_default_state,
+)
+from runner_sim.market.pricing import CompanyWeekResult
+from runner_sim.market.roster import all_runners as roster_all_runners
+from runner_sim.market.week import simulate_week
+from runner_sim.market.deployment import assign_squads
+from runner_sim.market.shell_market import BASE_SHELL_PRICE, N_SHELLS
+from runner_sim.shells import SHELL_ROSTER
+from runner_sim.zone_sim.items import load_items
+from runner_sim.zone_sim.zones import ZONES, Zone
+from runner_sim.shells import SHELL_BY_NAME
+
 # Ensure UTF-8 output on Windows consoles
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+
 # ---------------------------------------------------------------------------
-# TUNABLE CONSTANTS — adjust here if market behavior needs calibration
+# TUNABLE CONSTANTS (player-layer only)
 # ---------------------------------------------------------------------------
-TOTAL_RUNNERS       = 30      # fixed global runner pool split across all zones per week
-MIN_ZONE_RUNNERS    = 6       # minimum runners assigned to any one zone
-RUNNER_SKILL_MEAN   = 0.5
-RUNNER_SKILL_SD     = 0.15
-STARTING_CREDITS    = 10_000.0
-PRICE_FLOOR         = 1.0
-HEADCOUNT_SCALE     = 0.2     # how much extra runners inflate baseline expectation
-MIN_RUNNERS_PER_CO  = 3       # 1 per zone × 3 zones
-MAX_RUNNERS_PER_CO  = 15      # ~50% cap per zone × 3 zones
-# Stopgap calibration constant: empirical average performance score across all zones,
-# derived from a 1000-week headless simulation. Depends on TOTAL_RUNNERS, zone count,
-# RUNNER_SKILL_MEAN/SD, YIELD_STEEPNESS, and CONGESTION_K — recalibrate if any of
-# those change by running the headless_calibration() function at the bottom of this file.
-BASE_EXPECTATION    = 30.3    # recalibrated: headless_calibration(weeks=1000, seed=42)
-MAX_PERF_SCORE      = 150.0   # normalization ceiling for price-change formula
-DELTA_MULTIPLIER    = 10.0    # per spec
-NOISE_RANGE         = 2.0     # uniform ±2%
-SIM_PAUSE_SECS      = 0.8     # cosmetic delay during simulation
-YIELD_STEEPNESS     = 8       # quadratic zone difficulty multiplier in yield formula; raise to widen zone EV gap
-CONGESTION_K        = 0.05    # yield penalty per additional successful runner in a zone this week
+STARTING_CREDITS = 10_000.0
+SIM_PAUSE_SECS   = 0.8
 
 
 # ---------------------------------------------------------------------------
-# DATA STRUCTURES
+# DATA STRUCTURES (player layer — Company prices and Portfolio)
 # ---------------------------------------------------------------------------
-@dataclass
-class Zone:
-    name: str
-    difficulty: float  # 0–1 scale, same as skill; subtracted directly from success probability
-    monitored: bool    # True = player sees runner counts here
-
-
-ZONES: list[Zone] = [
-    Zone("Sector 7",   difficulty=0.1, monitored=True),
-    Zone("Deep Reach", difficulty=0.3, monitored=False),
-    Zone("The Shelf",  difficulty=0.5, monitored=False),
-]
-
-
-@dataclass
-class Runner:
-    zone_name: str
-    skill: float          # [0.0, 1.0]
-    company_name: str = ""
-    success: bool = False
-    yield_value: float = 0.0
-
-
 @dataclass
 class Company:
     name: str
     price: float
-
-
-@dataclass
-class CompanyWeekResult:
-    company_name: str
-    runner_count: int            # total across ALL zones
-    successes: int
-    success_rate: float
-    average_yield: float         # 0.0 if no successes
-    performance_score: float
-    baseline: float
-    delta: float
-    price_change_pct: float
-    price_before: float
-    price_after: float
-    monitored_runner_count: int  # player's zone only — for display
-    monitored_successes: int
-    monitored_average_yield: float
 
 
 @dataclass
@@ -129,254 +89,7 @@ class Portfolio:
 
 
 # ---------------------------------------------------------------------------
-# STEP 1 — RUNNER & ZONE GENERATION
-# ---------------------------------------------------------------------------
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
-
-
-def _distribute_zone_sizes(total: int, zones: list[Zone]) -> dict[str, int]:
-    """Split total runners across zones, each zone gets at least MIN_ZONE_RUNNERS."""
-    counts = {z.name: MIN_ZONE_RUNNERS for z in zones}
-    surplus = total - sum(counts.values())
-    names = [z.name for z in zones]
-    for _ in range(surplus):
-        counts[random.choice(names)] += 1
-    return counts
-
-
-def _allocate_to_companies(zone_runner_count: int, company_names: list[str]) -> dict[str, int]:
-    """Distribute runners within a zone to companies: min 1 each, no company > 50%."""
-    allocation = {name: 1 for name in company_names}
-    surplus = zone_runner_count - len(company_names)
-    cap = zone_runner_count // 2
-    for _ in range(surplus):
-        eligible = [n for n in company_names if allocation[n] < cap]
-        allocation[random.choice(eligible)] += 1
-    return allocation
-
-
-def assign_runners_standard(total: int, zones: list[Zone], company_names: list[str]) -> list[Runner]:
-    """Distribute runners randomly across zones, then assign to companies within each zone."""
-    zone_sizes = _distribute_zone_sizes(total, zones)
-    runners: list[Runner] = []
-    for zone in zones:
-        count = zone_sizes[zone.name]
-        allocation = _allocate_to_companies(count, company_names)
-        for company, n in allocation.items():
-            for _ in range(n):
-                skill = _clamp(random.gauss(RUNNER_SKILL_MEAN, RUNNER_SKILL_SD), 0.0, 1.0)
-                runners.append(Runner(
-                    zone_name=zone.name,
-                    skill=skill,
-                    company_name=company,
-                ))
-    return runners
-
-
-def assign_runners_skill_matched(total: int, zones: list[Zone], company_names: list[str]) -> list[Runner]:
-    """
-    Generate all runners first, then assign each to a zone with probability
-    proportional to zone.difficulty × runner.skill — skilled runners favour harder zones.
-    Zone capacity is pre-determined so every zone meets its minimum.
-    """
-    zone_sizes = _distribute_zone_sizes(total, zones)
-    remaining_capacity = dict(zone_sizes)
-
-    # Generate all skills upfront, sort descending so elite runners pick first
-    all_skills = sorted(
-        [_clamp(random.gauss(RUNNER_SKILL_MEAN, RUNNER_SKILL_SD), 0.0, 1.0) for _ in range(total)],
-        reverse=True,
-    )
-
-    zone_skill_buckets: dict[str, list[float]] = {z.name: [] for z in zones}
-    for skill in all_skills:
-        eligible = [z for z in zones if remaining_capacity[z.name] > 0]
-        # Weight: harder zones attract more skilled runners; +0.1 avoids zero weights
-        weights = [z.difficulty * skill + 0.1 for z in eligible]
-        chosen = random.choices(eligible, weights=weights, k=1)[0]
-        zone_skill_buckets[chosen.name].append(skill)
-        remaining_capacity[chosen.name] -= 1
-
-    runners: list[Runner] = []
-    zone_map = {z.name: z for z in zones}
-    for zone_name, skills in zone_skill_buckets.items():
-        zone = zone_map[zone_name]
-        allocation = _allocate_to_companies(len(skills), company_names)
-        # Shuffle skills before assigning to companies so company↔skill pairing is random
-        shuffled = list(skills)
-        random.shuffle(shuffled)
-        idx = 0
-        for company, n in allocation.items():
-            for _ in range(n):
-                runners.append(Runner(
-                    zone_name=zone.name,
-                    skill=shuffled[idx],
-                    company_name=company,
-                ))
-                idx += 1
-    return runners
-
-
-def build_monitored_allocation(runners: list[Runner], monitored_zone_name: str) -> dict[str, int]:
-    """Return per-company headcount for the player's monitored zone."""
-    counts: dict[str, int] = {}
-    for r in runners:
-        if r.zone_name == monitored_zone_name:
-            counts[r.company_name] = counts.get(r.company_name, 0) + 1
-    return counts
-
-
-# ---------------------------------------------------------------------------
-# STEP 2 — WEEK RESOLUTION
-# Two-pass design for simultaneous resolution:
-#   Pass 1 — _roll_success()        : roll the success die for every runner
-#   (count)  _count_zone_successes() : tally successes per zone across all companies
-#   Pass 2 — _apply_yield()         : apply congestion-adjusted yield to each winner
-# resolve_runner() wraps both passes and is kept for convenience (e.g. calibration).
-# ---------------------------------------------------------------------------
-def _roll_success(runner: Runner, zone_map: dict[str, Zone]) -> None:
-    """Pass 1: roll the success die and mutate runner.success."""
-    difficulty = zone_map[runner.zone_name].difficulty
-    p = _clamp(runner.skill - difficulty, 0.0, 1.0)
-    runner.success = random.random() < p
-
-
-def _apply_yield(runner: Runner, zone_map: dict[str, Zone], zone_successes: int) -> None:
-    """Pass 2: compute and assign yield for a successful runner.
-
-    zone_successes: total winners in this zone this week across ALL companies.
-    Congestion factor penalises yields when many runners succeed in the same zone.
-    No-op if runner did not succeed.
-    """
-    if not runner.success:
-        return
-    difficulty = zone_map[runner.zone_name].difficulty
-    congestion_factor = 1.0 / (1.0 + zone_successes * CONGESTION_K)
-    runner.yield_value = (
-        (50.0 + runner.skill * 100.0)
-        * (1.0 + difficulty ** 2 * YIELD_STEEPNESS)
-        * congestion_factor
-    )
-
-
-def _count_zone_successes(runners: list[Runner]) -> dict[str, int]:
-    """Return total successful runners per zone name across all companies."""
-    counts: dict[str, int] = {}
-    for r in runners:
-        if r.success:
-            counts[r.zone_name] = counts.get(r.zone_name, 0) + 1
-    return counts
-
-
-def resolve_runner(runner: Runner, zone_map: dict[str, Zone], zone_successes: int = 0) -> Runner:
-    """Convenience wrapper: roll success then apply yield in one call.
-    Suitable when zone_successes is known ahead of time (e.g. calibration sims).
-    The game loop uses the explicit two-pass approach instead.
-    """
-    _roll_success(runner, zone_map)
-    _apply_yield(runner, zone_map, zone_successes)
-    return runner
-
-
-def compute_company_result(
-    company: Company,
-    all_runners: list[Runner],
-    monitored_zone_name: str,
-    zone_map: dict[str, Zone],
-    zone_success_counts: dict[str, int],
-) -> CompanyWeekResult:
-    """Apply yields to this company's runners and compute market result.
-
-    Assumes Pass 1 (_roll_success) has already been run on all_runners and
-    zone_success_counts has been computed via _count_zone_successes. This
-    function only executes Pass 2 (_apply_yield) — it does not re-roll success.
-    """
-    company_runners = [r for r in all_runners if r.company_name == company.name]
-    for r in company_runners:
-        _apply_yield(r, zone_map, zone_success_counts.get(r.zone_name, 0))
-
-    # Aggregate across all zones — drives price
-    total = len(company_runners)
-    successes = sum(1 for r in company_runners if r.success)
-    success_rate = successes / total if total > 0 else 0.0
-    successful_yields = [r.yield_value for r in company_runners if r.success]
-    average_yield = sum(successful_yields) / len(successful_yields) if successful_yields else 0.0
-    performance_score = success_rate * average_yield
-    baseline = _compute_baseline(total)
-    delta = performance_score - baseline
-    price_change_pct = _compute_price_change_pct(performance_score, baseline)
-    price_before = company.price
-    price_after = max(price_before * (1.0 + price_change_pct / 100.0), PRICE_FLOOR)
-
-    # Monitored zone only — display intel for the player
-    mon = [r for r in company_runners if r.zone_name == monitored_zone_name]
-    mon_successes = sum(1 for r in mon if r.success)
-    mon_yields = [r.yield_value for r in mon if r.success]
-    mon_avg_yield = sum(mon_yields) / len(mon_yields) if mon_yields else 0.0
-
-    return CompanyWeekResult(
-        company_name=company.name,
-        runner_count=total,
-        successes=successes,
-        success_rate=success_rate,
-        average_yield=average_yield,
-        performance_score=performance_score,
-        baseline=baseline,
-        delta=delta,
-        price_change_pct=price_change_pct,
-        price_before=price_before,
-        price_after=price_after,
-        monitored_runner_count=len(mon),
-        monitored_successes=mon_successes,
-        monitored_average_yield=mon_avg_yield,
-    )
-
-
-# ---------------------------------------------------------------------------
-# STEP 3 — MARKET RESPONSE
-# ---------------------------------------------------------------------------
-def _compute_baseline(runner_count: int) -> float:
-    """Market expectation scales slightly with total runners across all zones."""
-    factor = 1.0 + (
-        (runner_count - MIN_RUNNERS_PER_CO) /
-        (MAX_RUNNERS_PER_CO - MIN_RUNNERS_PER_CO)
-    ) * HEADCOUNT_SCALE
-    return BASE_EXPECTATION * factor
-
-
-def _compute_price_change_pct(score: float, baseline: float) -> float:
-    """
-    Normalize delta against the theoretical max so the ×10 multiplier
-    produces ≈2–8% weekly swings rather than hundreds of percent.
-    """
-    delta = score - baseline
-    normalized = delta / MAX_PERF_SCORE
-    noise = random.uniform(-NOISE_RANGE, NOISE_RANGE)
-    return (normalized * DELTA_MULTIPLIER) + noise
-
-
-# ---------------------------------------------------------------------------
-# STEP 4 — PLAYER LAYER
-# ---------------------------------------------------------------------------
-def _prices_dict(companies: list[Company]) -> dict[str, float]:
-    return {c.name: c.price for c in companies}
-
-
-def _find_company(companies: list[Company], name_input: str) -> Company | None:
-    key = name_input.strip().lower().replace(" ", "")
-    for c in companies:
-        if c.name.lower().replace(" ", "").startswith(key):
-            return c
-    return None
-
-
-def _company_shortcuts(companies: list[Company]) -> str:
-    return "  ".join(f"[{c.name[0]}]{c.name[1:]}" for c in companies)
-
-
-# ---------------------------------------------------------------------------
-# STEP 5 — CONSOLE UI & GAME LOOP
+# FORMATTING HELPERS
 # ---------------------------------------------------------------------------
 DIVIDER = "─" * 52
 
@@ -399,41 +112,61 @@ def _difficulty_label(difficulty: float) -> str:
 
 
 def _expectation_label(delta: float) -> str:
-    if delta > 2.0:
+    if delta > 50.0:
         return "beat expectations"
-    if delta < -2.0:
+    if delta < -50.0:
         return "missed expectations"
     return "met expectations"
 
 
+def _prices_dict(companies: list[Company]) -> dict[str, float]:
+    return {c.name: c.price for c in companies}
+
+
+def _find_company(companies: list[Company], name_input: str) -> Company | None:
+    key = name_input.strip().lower().replace(" ", "")
+    for c in companies:
+        if c.name.lower().replace(" ", "").startswith(key):
+            return c
+    return None
+
+
+def _company_shortcuts(companies: list[Company]) -> str:
+    return "  ".join(f"[{c.name[0]}]{c.name[1:]}" for c in companies)
+
+
+# ---------------------------------------------------------------------------
+# PLANNING PHASE UI
+# ---------------------------------------------------------------------------
 def print_header(week: int) -> None:
     print(f"\n{DIVIDER}")
     print(f"  MARATHON MARKET SIMULATOR — WEEK {week}")
     print(DIVIDER)
 
 
-def select_runner_mode() -> bool:
-    """Returns True if skill-matched mode was selected."""
-    print(f"\n{DIVIDER}")
-    print("  RUNNER ASSIGNMENT MODE")
-    print(DIVIDER)
-    print("  [S]tandard  — runners distributed randomly across zones")
-    print("  [M]atched   — skilled runners favour harder zones")
-    while True:
-        choice = input("\n> ").strip().upper()
-        if choice in ("S", "STANDARD", ""):
-            print("  Standard mode selected.")
-            return False
-        if choice in ("M", "MATCHED"):
-            print("  Skill-matched mode selected.")
-            return True
-        print("  Enter S or M.")
+def _build_sector7_previews(rosters, monitored_zone: Zone) -> dict[str, list[str]]:
+    """Peek at each company's likely Sector 7 squad for the planning phase.
+
+    NOTE: assign_squads uses random shuffling, so the actual zone assignment
+    won't be locked in until simulate_week runs. This preview is a
+    'representative' draw — it shows three of the company's runners
+    formatted as 'Name/Shl', but the player can't know which 3 of 9 will
+    actually go to Sector 7. We use a stable seed-of-the-week so the same
+    preview shows during repeated planning prints.
+    """
+    previews: dict[str, list[str]] = {}
+    for co_name, roster in rosters.items():
+        # Just take the first 3 runners by id as a stable display preview.
+        # (assign_squads will randomly assign one squad to S7 at simulate time.)
+        sample = sorted(roster.runners, key=lambda r: r.id)[:3]
+        previews[co_name] = [f"{r.name}/{r.current_shell[:3]}" for r in sample]
+    return previews
 
 
 def print_planning_phase(
     week: int,
     companies: list[Company],
-    monitored_allocation: dict[str, int],
+    rosters,
     monitored_zone: Zone,
     portfolio: Portfolio,
     last_results: list[CompanyWeekResult] | None,
@@ -450,23 +183,144 @@ def print_planning_phase(
         print(f"  {name:<12} {shares} shares  (@ {price:.0f} cr = {_fmt_cr(shares * price)})")
     print(f"  Total value: {_fmt_cr(total)}")
 
-    # Zone intel — monitored zone only
-    print(f"\nZONE INTEL — {monitored_zone.name}  ({_difficulty_label(monitored_zone.difficulty)})")
+    # Roster summaries — visible across all companies
+    print(f"\nROSTERS")
     for company in companies:
-        count = monitored_allocation.get(company.name, 0)
-        print(f"  {company.name:<12} {count} runner{'s' if count != 1 else ''}")
+        roster = rosters[company.name]
+        avg_attempts = sum(r.extraction_attempts for r in roster.runners) / len(roster.runners)
+        deaths_total = sum(r.death_count for r in roster.runners)
+        print(f"  {company.name:<12} {len(roster.runners)} runners  "
+              f"avg {avg_attempts:.1f} extractions, {deaths_total} career deaths")
+
+    # Zone intel — preview of who could go to Sector 7
+    print(f"\nZONE INTEL — {monitored_zone.name}  ({_difficulty_label(monitored_zone.difficulty)})")
+    print(f"  (squad lineup randomized at deploy; preview shows roster sample)")
+    previews = _build_sector7_previews(rosters, monitored_zone)
+    for company in companies:
+        members = ", ".join(previews[company.name])
+        print(f"  {company.name:<12} [{members}]")
 
     # Market prices with last week's change
     print(f"\nMARKET PRICES")
     for company in companies:
-        line = f"  {company.name:<12} {company.price:>6.0f} cr"
+        line = f"  {company.name:<12} {company.price:>7.1f} cr"
         if last_results:
             for r in last_results:
                 if r.company_name == company.name:
                     line += f"  ({_fmt_pct(r.price_change_pct)} last week)"
         print(line)
 
-    print(f"\n[B]uy  [S]ell  [A]ll in  [H]old / advance week  [Q]uit")
+    print(f"\n[B]uy  [S]ell  [A]ll in  s[K] shells  [H]old / advance week  [Q]uit")
+
+
+# ---------------------------------------------------------------------------
+# TRADE INPUT HANDLERS
+# ---------------------------------------------------------------------------
+PREMIUM_SHELLS = {"Destroyer", "Thief", "Triage"}
+
+
+def _trend_arrow(delta: float) -> str:
+    """Single-character indicator of week-over-week price direction."""
+    if delta > 1.0:
+        return "▲"
+    if delta < -1.0:
+        return "▼"
+    return "·"
+
+
+def _sparkline(prices: list[float]) -> str:
+    """Render a price series as a 6-character ASCII sparkline.
+
+    Maps each value to one of '▁▂▃▄▅▆▇█' relative to the series range.
+    Use up to the last 6 weeks; if fewer weeks of history exist, pad blank.
+    """
+    if not prices:
+        return "      "
+    glyphs = "▁▂▃▄▅▆▇█"
+    series = prices[-6:]
+    lo, hi = min(series), max(series)
+    span = hi - lo
+    if span < 0.01:
+        return "·" * 6 + " " * max(0, 6 - len(series))
+    out = ""
+    for p in series:
+        idx = min(len(glyphs) - 1, int((p - lo) / span * len(glyphs)))
+        out += glyphs[idx]
+    return out + "·" * max(0, 6 - len(series))
+
+
+def show_shell_market_view(market, rosters) -> None:
+    """Render the shell market state — prices, week-over-week change, adoption.
+
+    The display answers two questions for the player:
+      1. Where are shell prices right now and which way are they moving?
+      2. Is the market actually using all 7 shells, or just clustering on
+         Destroyer/Thief/Triage?
+    """
+    print(f"\n{DIVIDER}")
+    print(f"  SHELL MARKET")
+    print(DIVIDER)
+
+    # Current adoption counts
+    from collections import Counter
+    runners = roster_all_runners(rosters)
+    total_runners = len(runners)
+    counts = Counter(r.current_shell for r in runners)
+
+    # Previous week's prices (for week-over-week delta)
+    if len(market.price_history) >= 2:
+        prev_prices = market.price_history[-2]
+    else:
+        prev_prices = {s.name: BASE_SHELL_PRICE for s in SHELL_ROSTER}
+
+    # Header
+    print(f"\n  {'Shell':<10}  {'Price':>8}  {'Δ wk':>8}  {'':1}  {'Trend':>7}  "
+          f"{'Adoption':>13}")
+    print(f"  {'─'*10}  {'─'*8}  {'─'*8}  {'─'*1}  {'─'*7}  {'─'*13}")
+
+    # Sort by current price descending
+    sorted_shells = sorted(SHELL_ROSTER, key=lambda s: -market.prices[s.name])
+
+    for shell in sorted_shells:
+        price = market.prices[shell.name]
+        prev = prev_prices.get(shell.name, BASE_SHELL_PRICE)
+        delta = price - prev
+        delta_str = f"{delta:+.1f}" if abs(delta) >= 0.05 else "  —  "
+        arrow = _trend_arrow(delta)
+
+        # Sparkline from price_history (last 6 weeks)
+        history_for_shell = [snap.get(shell.name, BASE_SHELL_PRICE)
+                              for snap in market.price_history]
+        spark = _sparkline(history_for_shell)
+
+        # Adoption
+        count = counts.get(shell.name, 0)
+        pct = 100 * count / total_runners if total_runners else 0
+        is_premium = shell.name in PREMIUM_SHELLS
+        tag = " ★" if is_premium else "  "
+
+        print(f"  {shell.name:<10}  {price:>7.1f}cr  {delta_str:>8}  {arrow:1}  "
+              f"{spark:>7}  {count:>2} ({pct:4.1f}%){tag}")
+
+    # Footer: premium vs middle adoption split
+    premium_count = sum(counts.get(s, 0) for s in PREMIUM_SHELLS)
+    middle_count = total_runners - premium_count
+    fair_share_pct = 100 / N_SHELLS  # 14.3%
+
+    print(f"  {'─'*10}  {'─'*8}  {'─'*8}  {'─'*1}  {'─'*7}  {'─'*13}")
+    print(f"\n  ★ Premium archetypes (Destroyer/Thief/Triage):  "
+          f"{premium_count}/{total_runners} ({100*premium_count/total_runners:.1f}%)")
+    print(f"    Middle shells (Vandal/Assassin/Recon/Rook):     "
+          f"{middle_count}/{total_runners} ({100*middle_count/total_runners:.1f}%)")
+    print(f"    Fair share (uniform adoption): {fair_share_pct:.1f}% per shell")
+
+    weeks_recorded = len(market.price_history)
+    if weeks_recorded > 1:
+        print(f"\n  Showing latest prices · sparkline = last {min(6, weeks_recorded)} weeks")
+    else:
+        print(f"\n  Sparklines build up over time — come back after a few weeks.")
+
+    input("\nPress ENTER to return...")
 
 
 def handle_buy(companies: list[Company], portfolio: Portfolio) -> None:
@@ -539,13 +393,14 @@ def handle_sell(companies: list[Company], portfolio: Portfolio) -> None:
 def planning_loop(
     week: int,
     companies: list[Company],
-    monitored_allocation: dict[str, int],
+    rosters,
     monitored_zone: Zone,
     portfolio: Portfolio,
     last_results: list[CompanyWeekResult] | None,
+    market = None,
 ) -> bool:
     """Returns False if the player chose to quit."""
-    print_planning_phase(week, companies, monitored_allocation, monitored_zone, portfolio, last_results)
+    print_planning_phase(week, companies, rosters, monitored_zone, portfolio, last_results)
     while True:
         action = input("> ").strip().upper()
         if action in ("", "H", "HOLD"):
@@ -554,74 +409,71 @@ def planning_loop(
             return False
         if action == "B":
             handle_buy(companies, portfolio)
-            print_planning_phase(week, companies, monitored_allocation, monitored_zone, portfolio, last_results)
+            print_planning_phase(week, companies, rosters, monitored_zone, portfolio, last_results)
         elif action == "S":
             handle_sell(companies, portfolio)
-            print_planning_phase(week, companies, monitored_allocation, monitored_zone, portfolio, last_results)
+            print_planning_phase(week, companies, rosters, monitored_zone, portfolio, last_results)
         elif action == "A":
             handle_all_in(companies, portfolio)
-            print_planning_phase(week, companies, monitored_allocation, monitored_zone, portfolio, last_results)
+            print_planning_phase(week, companies, rosters, monitored_zone, portfolio, last_results)
+        elif action == "K":
+            if market is not None:
+                show_shell_market_view(market, rosters)
+            else:
+                print("  Shell market not available.")
+            print_planning_phase(week, companies, rosters, monitored_zone, portfolio, last_results)
         else:
-            print("  Enter B, S, A, H, or Q.")
+            print("  Enter B, S, A, K, H, or Q.")
 
 
-def _print_zone_breakdown(all_runners: list[Runner], zones: list[Zone], companies: list[Company]) -> None:
-    """Debug view: runner outcomes broken down by every zone."""
-    print(f"\nALL ZONES BREAKDOWN  [debug]")
-    zone_success_counts = _count_zone_successes(all_runners)
-    for zone in zones:
-        tag = " ★ monitored" if zone.monitored else " · hidden"
-        zone_runners = [r for r in all_runners if r.zone_name == zone.name]
-        avg_skill = sum(r.skill for r in zone_runners) / len(zone_runners) if zone_runners else 0.0
-        zone_successes = zone_success_counts.get(zone.name, 0)
-        congestion_factor = 1.0 / (1.0 + zone_successes * CONGESTION_K)
-        print(f"  {zone.name} ({_difficulty_label(zone.difficulty)}){tag}  avg skill {avg_skill:.2f}"
-              f"  |  {zone_successes} successes  congestion ×{congestion_factor:.2f}")
-        for company in companies:
-            co_runners = [r for r in zone_runners if r.company_name == company.name]
-            if not co_runners:
-                continue
-            total = len(co_runners)
-            successes = sum(1 for r in co_runners if r.success)
-            yields = [r.yield_value for r in co_runners if r.success]
-            avg_yield = sum(yields) / len(yields) if yields else 0.0
-            yield_str = f"avg yield {avg_yield:>5.0f} cr" if successes else "---"
-            print(f"    {company.name:<12} ({total})  {successes}/{total} success   {yield_str}")
-
-
+# ---------------------------------------------------------------------------
+# RESULTS UI
+# ---------------------------------------------------------------------------
 def print_results(
     results: list[CompanyWeekResult],
     monitored_zone: Zone,
     portfolio: Portfolio,
     portfolio_value_before: float,
     companies: list[Company],
-    all_runners: list[Runner] | None = None,
+    rosters,
+    market,
     debug: bool = False,
 ) -> None:
     print(f"\n{DIVIDER}")
     print("  RESULTS")
     print(DIVIDER)
 
-    if debug and all_runners is not None:
-        _print_zone_breakdown(all_runners, ZONES, companies)
-
     # Monitored zone outcomes — what the player had signal on
     print(f"\nYOUR ZONE — {monitored_zone.name}  ({_difficulty_label(monitored_zone.difficulty)})")
     for r in results:
-        count = r.monitored_runner_count
-        if r.monitored_successes > 0:
-            yield_str = f"avg yield {r.monitored_average_yield:>5.0f} cr"
+        names = ", ".join(r.monitored_runner_names) if r.monitored_runner_names else "—"
+        if r.monitored_squad_returned:
+            outcome = "Squad RETURNED"
+            detail = f"  {r.monitored_credits:>5.0f} cr  ·  {r.monitored_eliminations} kills"
         else:
-            yield_str = "---"
-        print(f"  {r.company_name:<12} ({count})  "
-              f"{r.monitored_successes}/{count} success   {yield_str}")
+            outcome = "Squad LOST    "
+            detail = "  — no extraction —"
+        print(f"  {r.company_name:<12} {outcome}   [{names}]")
+        print(f"               {detail}")
 
     # Market response — driven by all zones combined
     print(f"\nMARKET RESPONSE  (all zones)")
     for r in results:
         label = _expectation_label(r.delta)
-        print(f"  {r.company_name:<12} {r.price_before:>6.0f} → {r.price_after:>6.0f} cr  "
-              f"({_fmt_pct(r.price_change_pct):>6})  [{label}]")
+        print(f"  {r.company_name:<12} {r.price_before:>7.1f} → {r.price_after:>7.1f} cr  "
+              f"({_fmt_pct(r.price_change_pct):>7})  [{label}]")
+
+    # Debug-only: per-zone shell market state
+    if debug:
+        print(f"\nSHELL MARKET  [debug]")
+        for shell, price in sorted(market.prices.items(), key=lambda kv: -kv[1]):
+            print(f"  {shell:<10} {price:>6.1f} cr")
+        print(f"\nROSTER STATE  [debug]")
+        for company in companies:
+            roster = rosters[company.name]
+            from collections import Counter
+            shells = Counter(r.current_shell for r in roster.runners)
+            print(f"  {company.name:<12} shells: {dict(shells)}")
 
     prices = _prices_dict(companies)
     value_after = portfolio.total_value(prices)
@@ -640,8 +492,8 @@ def print_results(
     input("\nPress ENTER to continue...")
 
 
-def print_session_end(week: int, portfolio: Portfolio) -> None:
-    final = portfolio.credits + sum(portfolio.holdings.values())
+def print_session_end(week: int, portfolio: Portfolio, prices: dict[str, float]) -> None:
+    final = portfolio.total_value(prices)
     net_pct = (final - STARTING_CREDITS) / STARTING_CREDITS * 100
     sign = "+" if net_pct >= 0 else ""
     print(f"\n{DIVIDER}")
@@ -654,6 +506,9 @@ def print_session_end(week: int, portfolio: Portfolio) -> None:
     print(DIVIDER)
 
 
+# ---------------------------------------------------------------------------
+# MAIN GAME LOOP
+# ---------------------------------------------------------------------------
 def run_game() -> None:
     debug = "--debug" in sys.argv
 
@@ -662,41 +517,35 @@ def run_game() -> None:
     print("   Tau Ceti IV — Financial Intelligence Division")
     print("=" * 52)
     if debug:
-        print("   [DEBUG MODE — all zones visible]")
+        print("   [DEBUG MODE — shell market and full roster visible]")
     print(f"\nStarting capital: {_fmt_cr(STARTING_CREDITS)}")
     print(f"Zones: {len(ZONES)} total  |  Monitoring: 1  |  Press Q to quit")
 
-    skill_matched = select_runner_mode()
-
     input("\nPress ENTER to begin...\n")
 
+    # --- bootstrap: 4 companies × 9 runners + initial shell market ---
     companies: list[Company] = [
         Company("CyberAcme", 450.0),
         Company("Sekiguchi",  380.0),
         Company("Traxus",     300.0),
         Company("NuCaloric",  200.0),
     ]
-    company_names = [c.name for c in companies]
+    rosters, market = bootstrap_default_state(
+        company_names=tuple(c.name for c in companies)
+    )
+    item_catalog = load_items()
     monitored_zone = next(z for z in ZONES if z.monitored)
-    zone_map = {z.name: z for z in ZONES}
 
     portfolio = Portfolio()
     last_results: list[CompanyWeekResult] | None = None
     week = 1
 
     while True:
-        # Generate all runners for this week across all zones
-        if skill_matched:
-            all_runners = assign_runners_skill_matched(TOTAL_RUNNERS, ZONES, company_names)
-        else:
-            all_runners = assign_runners_standard(TOTAL_RUNNERS, ZONES, company_names)
-
-        monitored_allocation = build_monitored_allocation(all_runners, monitored_zone.name)
         value_before = portfolio.total_value(_prices_dict(companies))
 
         # Planning phase
         still_playing = planning_loop(
-            week, companies, monitored_allocation, monitored_zone, portfolio, last_results
+            week, companies, rosters, monitored_zone, portfolio, last_results, market=market
         )
         if not still_playing:
             break
@@ -705,69 +554,25 @@ def run_game() -> None:
         print(f"\n  Simulating week {week}...")
         time.sleep(SIM_PAUSE_SECS)
 
-        # Pass 1: roll success for every runner simultaneously
-        for r in all_runners:
-            _roll_success(r, zone_map)
-        zone_success_counts = _count_zone_successes(all_runners)
+        # Run one week through the integrated stack
+        company_prices = _prices_dict(companies)
+        results = simulate_week(rosters, market, ZONES, item_catalog, company_prices=company_prices)
 
-        # Pass 2: apply yields with congestion, then compute market response per company
-        results: list[CompanyWeekResult] = []
-        for company in companies:
-            result = compute_company_result(company, all_runners, monitored_zone.name, zone_map, zone_success_counts)
-            company.price = result.price_after
-            results.append(result)
+        # Push price changes back into Company objects
+        for r in results:
+            for c in companies:
+                if c.name == r.company_name:
+                    c.price = r.price_after
 
-        print_results(results, monitored_zone, portfolio, value_before, companies, all_runners, debug)
+        print_results(
+            results, monitored_zone, portfolio, value_before, companies,
+            rosters, market, debug,
+        )
 
         last_results = results
         week += 1
 
-    print_session_end(week, portfolio)
-
-
-def headless_calibration(weeks: int = 1000, seed: int = 42) -> float:
-    """Run a headless simulation and return the average performance score across all
-    companies and weeks. Use the result to recalibrate BASE_EXPECTATION whenever
-    TOTAL_RUNNERS, zone count, RUNNER_SKILL_MEAN/SD, YIELD_STEEPNESS, or CONGESTION_K
-    change.
-
-    Usage:
-        uv run python -c "from marathon_market import headless_calibration; print(headless_calibration())"
-    """
-    random.seed(seed)
-    companies = [
-        Company("CyberAcme", 450.0),
-        Company("Sekiguchi",  380.0),
-        Company("Traxus",     300.0),
-        Company("NuCaloric",  200.0),
-    ]
-    company_names = [c.name for c in companies]
-    zone_map = {z.name: z for z in ZONES}
-
-    total_score = 0.0
-    total_samples = 0
-
-    for _ in range(weeks):
-        all_runners = assign_runners_standard(TOTAL_RUNNERS, ZONES, company_names)
-
-        # Two-pass resolution (same logic as run_game)
-        for r in all_runners:
-            _roll_success(r, zone_map)
-        zone_success_counts = _count_zone_successes(all_runners)
-
-        for company in companies:
-            company_runners = [r for r in all_runners if r.company_name == company.name]
-            for r in company_runners:
-                _apply_yield(r, zone_map, zone_success_counts.get(r.zone_name, 0))
-            total = len(company_runners)
-            successes = sum(1 for r in company_runners if r.success)
-            success_rate = successes / total if total > 0 else 0.0
-            successful_yields = [r.yield_value for r in company_runners if r.success]
-            avg_yield = sum(successful_yields) / len(successful_yields) if successful_yields else 0.0
-            total_score += success_rate * avg_yield
-            total_samples += 1
-
-    return total_score / total_samples if total_samples > 0 else 0.0
+    print_session_end(week, portfolio, _prices_dict(companies))
 
 
 if __name__ == "__main__":
