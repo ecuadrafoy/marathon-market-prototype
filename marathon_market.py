@@ -429,6 +429,34 @@ def planning_loop(
 # ---------------------------------------------------------------------------
 # RESULTS UI
 # ---------------------------------------------------------------------------
+def _print_roster_detail(rosters, companies) -> None:
+    """Per-runner state for each company's roster.
+
+    Shows attribute drift, shell, lifetime career stats. Sorted by net_loot
+    descending within each company so top earners surface first — doubles
+    as an in-team leaderboard.
+
+    The c/e/s column is the diagnostic field for specialization: a veteran
+    in a Triage shell should show ~0.10/0.20/0.70 (drifted toward the shell
+    affinity vector); a fresh recruit will still show their random simplex
+    starting point.
+    """
+    print(f"\nROSTER DETAIL  [debug]")
+    for company in companies:
+        roster = rosters[company.name]
+        sorted_runners = sorted(roster.runners, key=lambda r: -r.net_loot)
+
+        print(f"\n  ─ {company.name} " + "─" * (60 - len(company.name)))
+        print(f"    {'Name':<10}  {'Shell':<10}  {'c/e/s':<17}  "
+              f"{'Ext':>6}  {'Net cr':>7}  {'Kills':>5}  {'Bal':>5}")
+        for r in sorted_runners:
+            cps = f"{r.combat:.2f}/{r.extraction:.2f}/{r.support:.2f}"
+            ext = f"{r.extraction_successes}/{r.extraction_attempts}"
+            print(f"    {r.name:<10}  {r.current_shell:<10}  {cps:<17}  "
+                  f"{ext:>6}  {r.net_loot:>7,.0f}  {r.eliminations:>5}  "
+                  f"{r.credit_balance:>5,.0f}")
+
+
 def _print_all_zones_breakdown(zone_results, monitored_zone: Zone) -> None:
     """Debug view: per-squad outcomes for every zone, including hidden ones.
 
@@ -506,12 +534,16 @@ def print_results(
         print(f"\nSHELL MARKET  [debug]")
         for shell, price in sorted(market.prices.items(), key=lambda kv: -kv[1]):
             print(f"  {shell:<10} {price:>6.1f} cr")
-        print(f"\nROSTER STATE  [debug]")
+
+        print(f"\nSHELL COMPOSITION  [debug]")
         for company in companies:
             roster = rosters[company.name]
             from collections import Counter
             shells = Counter(r.current_shell for r in roster.runners)
-            print(f"  {company.name:<12} shells: {dict(shells)}")
+            shell_str = "  ".join(f"{name[:3]}×{count}" for name, count in shells.most_common())
+            print(f"  {company.name:<12} {shell_str}")
+
+        _print_roster_detail(rosters, companies)
 
     prices = _prices_dict(companies)
     value_after = portfolio.total_value(prices)
