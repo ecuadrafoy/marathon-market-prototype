@@ -101,84 +101,168 @@ class TestApplyZoneOutcomeEliminated:
 # Branch 2: squad extracted (successful run)
 # ---------------------------------------------------------------------------
 class TestApplyZoneOutcomeExtracted:
-    # TODO: implement these tests.
-    #
-    # apply_zone_outcome with squad_extracted=True, squad_eliminated=False
-    # should do ALL of the following:
-    #
-    #   - increment extraction_attempts by 1
-    #   - increment extraction_successes by 1
-    #   - add credits_received to both credit_balance AND net_loot
-    #   - add kills_attributed to runner.eliminations
-    #   - append current_shell to shell_history
-    #   - NOT set _died_this_week
-    #   - apply attribute drift (runner attributes should change slightly)
-    #   - apply affinity gain (runner.shell_affinities[shell] should increase)
-    #
-    # Hints:
-    #   - Use _fresh_runner() to get a clean starting state
-    #   - Drift and affinity are stochastic by nature but deterministic given
-    #     fixed inputs — you can assert "changed" rather than exact values
-    #   - For kills, pass kills_attributed=3 and assert runner.eliminations == 3
+    """Full update path: credits, kills, drift, affinity, shell_history — all fire."""
 
     def test_credits_added_to_balance(self):
-        # TODO
-        pass
+        runner = _fresh_runner()
+        balance_before = runner.credit_balance   # 100.0
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=250.0, kills_attributed=0)
+        assert runner.credit_balance == pytest.approx(balance_before + 250.0)
 
     def test_credits_added_to_net_loot(self):
-        # TODO
-        pass
+        """net_loot is the lifetime leaderboard stat — also receives the credit."""
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=250.0, kills_attributed=0)
+        assert runner.net_loot == pytest.approx(250.0)
+
+    def test_extraction_attempts_incremented(self):
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.extraction_attempts == 1
 
     def test_extraction_successes_incremented(self):
-        # TODO
-        pass
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.extraction_successes == 1
 
     def test_kills_attributed(self):
-        # TODO
-        pass
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=3)
+        assert runner.eliminations == 3
+
+    def test_zero_kills_attributed(self):
+        """Passing 0 kills must not create a negative or phantom kill count."""
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.eliminations == 0
 
     def test_shell_history_appended(self):
-        # TODO
-        pass
+        runner = _fresh_runner("Destroyer")
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.shell_history == ["Destroyer"]
 
     def test_died_this_week_not_set(self):
-        # TODO
-        pass
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert not getattr(runner, "_died_this_week", False)
 
-    def test_attributes_drift(self):
-        # TODO: assert that at least one of combat/extraction/support changed
-        pass
+    def test_attributes_drift_in_correct_direction(self):
+        """drift_attributes does an EMA step toward the shell's affinity vector.
+
+        Thief shell: combat_affinity=0.2, extraction_affinity=0.7, support_affinity=0.1
+        Fresh runner: combat=0.3, extraction=0.5, support=0.2
+
+        After one drift step (rate=0.05):
+          - extraction should INCREASE (0.5 → shell target 0.7)
+          - combat should DECREASE (0.3 → shell target 0.2)
+        """
+        runner = _fresh_runner("Thief")
+        extraction_before = runner.extraction
+        combat_before = runner.combat
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.extraction > extraction_before, "Thief drift should raise extraction"
+        assert runner.combat < combat_before, "Thief drift should lower combat"
 
     def test_attributes_still_sum_to_one_after_drift(self):
-        # TODO: drift should preserve the simplex constraint
-        pass
+        """EMA drift preserves the simplex constraint (both vectors sum to 1.0,
+        so per-axis deltas sum to 0 and the total stays exactly 1.0)."""
+        runner = _fresh_runner("Thief")
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        total = runner.combat + runner.extraction + runner.support
+        assert abs(total - 1.0) < 1e-9
+
+    def test_affinity_gained_for_current_shell(self):
+        """gain_affinity increments shell_affinities[current_shell] by AFFINITY_PER_WEEK.
+
+        Fresh runners start at 0.0 affinity; after one extraction they should be > 0.
+        """
+        runner = _fresh_runner("Thief")
+        affinity_before = runner.shell_affinities.get("Thief", 0.0)  # 0.0 for a fresh runner
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.shell_affinities["Thief"] > affinity_before
+
+    def test_affinity_for_other_shells_unchanged(self):
+        """Only the currently worn shell gains affinity — no bleed to others."""
+        runner = _fresh_runner("Thief")
+        apply_zone_outcome(runner, squad_extracted=True, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        for shell_name, aff in runner.shell_affinities.items():
+            if shell_name != "Thief":
+                assert aff == 0.0, f"Unexpected affinity gain on {shell_name}"
 
 
 # ---------------------------------------------------------------------------
 # Branch 3: neither extracted nor eliminated (defensive fallback)
 # ---------------------------------------------------------------------------
 class TestApplyZoneOutcomeFallback:
-    # TODO: implement these tests.
-    #
-    # apply_zone_outcome with squad_extracted=False, squad_eliminated=False
-    # is a defensive branch that "shouldn't fire today" per the docstring.
-    # But we still want to verify its contract:
-    #
-    #   - extraction_attempts incremented
-    #   - extraction_successes NOT incremented
-    #   - credit_balance unchanged (no credits received)
-    #   - _died_this_week NOT set
-    #   - drift IS applied (runner participated, just didn't extract)
-    #   - shell_history appended
+    """Participation without extraction or death.
+
+    Per the docstring this branch 'shouldn't fire today' — run_zone forces
+    extraction at end-of-run. But the contract still matters: the runner
+    participated, so they drift and gain affinity, but receive no loot.
+    """
 
     def test_no_credits_in_fallback(self):
-        # TODO
-        pass
+        runner = _fresh_runner()
+        balance_before = runner.credit_balance
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=500.0, kills_attributed=0)
+        assert runner.credit_balance == balance_before
+
+    def test_net_loot_unchanged_in_fallback(self):
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=500.0, kills_attributed=0)
+        assert runner.net_loot == 0.0
 
     def test_no_extraction_success_in_fallback(self):
-        # TODO
-        pass
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.extraction_successes == 0
+
+    def test_extraction_attempts_incremented_in_fallback(self):
+        """The attempt happened — it just ended in neither outcome."""
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.extraction_attempts == 1
 
     def test_not_marked_as_dead_in_fallback(self):
-        # TODO
-        pass
+        runner = _fresh_runner()
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert not getattr(runner, "_died_this_week", False)
+
+    def test_drift_still_applied_in_fallback(self):
+        """Runner participated — drift fires same as in the extraction branch."""
+        runner = _fresh_runner("Thief")
+        extraction_before = runner.extraction
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.extraction > extraction_before
+
+    def test_affinity_still_gained_in_fallback(self):
+        """gain_affinity fires in the fallback branch too — the runner was there."""
+        runner = _fresh_runner("Thief")
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.shell_affinities["Thief"] > 0.0
+
+    def test_shell_history_appended_in_fallback(self):
+        """shell_history.append sits outside the if/else — fires in all branches."""
+        runner = _fresh_runner("Recon")
+        apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
+                           credits_received=0.0, kills_attributed=0)
+        assert runner.shell_history == ["Recon"]
