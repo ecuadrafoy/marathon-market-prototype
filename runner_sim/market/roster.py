@@ -44,6 +44,9 @@ class CompanyRoster:
     company_name: str
     runners: list[Runner] = field(default_factory=list)
     next_runner_id: int = 0
+    total_deaths: int = 0   # cumulative runner deaths across all weeks;
+                            # per-runner death_count is lost when the runner
+                            # is removed, so we accumulate it here instead.
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +129,7 @@ def replace_dead_runners(
     """
     survivors = [r for r in roster.runners if not getattr(r, "_died_this_week", False)]
     deaths = len(roster.runners) - len(survivors)
+    roster.total_deaths += deaths   # accumulate before the dead runners are discarded
     roster.runners = survivors
 
     for _ in range(deaths):

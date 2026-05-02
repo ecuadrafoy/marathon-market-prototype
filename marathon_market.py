@@ -188,9 +188,8 @@ def print_planning_phase(
     for company in companies:
         roster = rosters[company.name]
         avg_attempts = sum(r.extraction_attempts for r in roster.runners) / len(roster.runners)
-        deaths_total = sum(r.death_count for r in roster.runners)
         print(f"  {company.name:<12} {len(roster.runners)} runners  "
-              f"avg {avg_attempts:.1f} extractions, {deaths_total} career deaths")
+              f"avg {avg_attempts:.1f} extractions, {roster.total_deaths} career deaths")
 
     # Zone intel — preview of who could go to Sector 7
     print(f"\nZONE INTEL — {monitored_zone.name}  ({_difficulty_label(monitored_zone.difficulty)})")
