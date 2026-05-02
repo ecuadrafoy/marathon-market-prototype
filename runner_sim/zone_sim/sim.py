@@ -73,6 +73,20 @@ class Squad:
 
 
 @dataclass
+class CombatEvent:
+    """One combat resolution between two squads.
+
+    Recorded for downstream attribution: callers (e.g. the market layer)
+    distribute kill credit across the winner's runners proportional to
+    their effective combat contribution. Avoids parsing match_log strings.
+    """
+    tick: int
+    winner_squad: str
+    loser_squad: str
+    loser_runner_count: int
+
+
+@dataclass
 class ZoneRunResult:
     """Outcome of a single zone run."""
     zone_name: str
@@ -80,6 +94,7 @@ class ZoneRunResult:
     match_log: list[str]                     # human-readable event sequence
     pool_size_at_start: int
     pool_size_at_end: int
+    combat_events: list[CombatEvent] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +252,13 @@ def _phase_combat(
     combat_pairs: list[tuple[Squad, Squad]],
     log: list[str],
     tick: int,
+    combat_events: list[CombatEvent] | None = None,
 ) -> None:
-    """Resolve combat between engaged squad pairs. Apply kill-loot transfer."""
+    """Resolve combat between engaged squad pairs. Apply kill-loot transfer.
+
+    If `combat_events` is supplied, append a structured CombatEvent for each
+    resolved fight so callers can attribute kills to specific runners.
+    """
     for a, b in combat_pairs:
         # Compute breakdowns once — reused for both the roll and the log.
         a_bd   = _squad_breakdown(a.runners)
@@ -253,6 +273,14 @@ def _phase_combat(
 
         winner.took_damage_this_run = True
         loser.eliminated = True
+
+        if combat_events is not None:
+            combat_events.append(CombatEvent(
+                tick=tick,
+                winner_squad=winner.name,
+                loser_squad=loser.name,
+                loser_runner_count=len(loser.runners),
+            ))
 
         # Per-runner combat contribution strings.
         def _runner_parts(squad: Squad, bd: np.ndarray) -> str:
@@ -322,6 +350,7 @@ def run_zone(
     pool = spawn_zone_pool(zone, item_catalog)
     pool_at_start = len(pool)
     log: list[str] = []
+    combat_events: list[CombatEvent] = []
 
     log.append(
         f"=== {zone.name} (difficulty {zone.difficulty}, pool_size {zone.pool_size}) ==="
@@ -341,7 +370,7 @@ def run_zone(
         combat_pairs = _phase_encounters(squads, log, tick)
 
         # Phase 3: Combat
-        _phase_combat(combat_pairs, log, tick)
+        _phase_combat(combat_pairs, log, tick, combat_events=combat_events)
 
         # Phase 4: Extraction decisions
         _phase_extraction(squads, log, tick, max_ticks)
@@ -373,4 +402,5 @@ def run_zone(
         match_log=log,
         pool_size_at_start=pool_at_start,
         pool_size_at_end=len(pool),
+        combat_events=combat_events,
     )

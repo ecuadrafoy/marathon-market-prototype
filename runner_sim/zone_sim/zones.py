@@ -33,6 +33,7 @@ class Zone:
     name: str
     difficulty: float    # 0.0 - 1.0; lowers exploration success probability
     pool_size: int       # number of items spawned in this zone per week
+    monitored: bool = False   # True for the player-visible zone (Sector 7) — provides intel
 
     @property
     def csv_column(self) -> str:
@@ -49,6 +50,9 @@ def load_zones(csv_path: str | Path | None = None) -> list[Zone]:
     Rows are returned in CSV order, which determines zone ordering throughout
     the simulation (distribution, display, pool spawning). Edit zones.csv to
     add, remove, or reorder zones — no code changes required.
+
+    The `monitored` column is optional (defaults to False) for backwards
+    compatibility with older zones.csv files.
     """
     path = Path(csv_path) if csv_path is not None else _DEFAULT_PATH
     zones: list[Zone] = []
@@ -59,6 +63,7 @@ def load_zones(csv_path: str | Path | None = None) -> list[Zone]:
                 name=row["name"],
                 difficulty=float(row["difficulty"]),
                 pool_size=int(row["pool_size"]),
+                monitored=bool(int(row.get("monitored", "0"))),
             ))
     return zones
 

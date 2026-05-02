@@ -1,4 +1,4 @@
-name,difficulty,pool_size
-Sector 7,0.1,12
-Deep Reach,0.3,8
-The Shelf,0.5,5
+name,difficulty,pool_size,monitored
+Sector 7,0.1,12,1
+Deep Reach,0.3,8,0
+The Shelf,0.5,5,0

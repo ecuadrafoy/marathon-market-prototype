@@ -8,3 +8,11 @@ dependencies = [
     "numpy>=2.0",
     "rich>=15.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
