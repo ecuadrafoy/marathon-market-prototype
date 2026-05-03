@@ -1,10 +1,11 @@
-"""Tests for ai_tree composites + XML loader.
+"""Tests for ai_tree composites + JSON loader.
 
 Covers:
 - Sequence and Selector short-circuit semantics
 - Inverter inversion
 - Leaf wrapping conditions and actions
-- XML loading: well-formed trees, malformed XML, missing nodes, parameter coercion
+- JSON loading: well-formed trees, malformed JSON, missing nodes, parameter coercion
+- File-path-based load_tree dispatch
 """
 
 import pytest
@@ -12,12 +13,7 @@ import pytest
 from ai_tree.composites import Inverter, Leaf, Selector, Sequence, Status
 from ai_tree.context import Context
 from ai_tree.registry import ParamSpec, bt_action, bt_condition, clear_registry, get
-from ai_tree.runtime import (
-    Tree,
-    TreeLoadError,
-    load_tree_from_json_string,
-    load_tree_from_string,
-)
+from ai_tree.runtime import Tree, TreeLoadError, load_tree, load_tree_from_json_string
 
 
 # ---------------------------------------------------------------------------
@@ -126,102 +122,12 @@ class TestActionLeaf:
 
 
 # ---------------------------------------------------------------------------
-# XML loader
+# Param-missing error (registered with no default)
 # ---------------------------------------------------------------------------
-class TestXmlLoader:
-    def test_loads_simple_selector(self, synthetic_leaves):
-        xml = """
-        <root BTCPP_format="4">
-          <BehaviorTree ID="Test">
-            <Selector>
-              <Action ID="False"/>
-              <Action ID="True"/>
-            </Selector>
-          </BehaviorTree>
-        </root>
-        """
-        tree = load_tree_from_string(xml)
-        assert tree.tick(Context()) is True
-
-    def test_fallback_is_alias_for_selector(self, synthetic_leaves):
-        """Groot uses <Fallback>; we accept it and treat it as Selector."""
-        xml = """
-        <root>
-          <BehaviorTree ID="Test">
-            <Fallback>
-              <Action ID="False"/>
-              <Action ID="True"/>
-            </Fallback>
-          </BehaviorTree>
-        </root>
-        """
-        tree = load_tree_from_string(xml)
-        assert tree.tick(Context()) is True
-
-    def test_nested_sequence_in_selector(self, synthetic_leaves):
-        xml = """
-        <root>
-          <BehaviorTree ID="Test">
-            <Selector>
-              <Sequence>
-                <Action ID="ReadFlag"/>
-                <Action ID="True"/>
-              </Sequence>
-              <Action ID="False"/>
-            </Selector>
-          </BehaviorTree>
-        </root>
-        """
-        tree = load_tree_from_string(xml)
-        assert tree.tick(Context(flag=True)) is True
-        assert tree.tick(Context(flag=False)) is False
-
-    def test_inverter_decorator(self, synthetic_leaves):
-        xml = """
-        <root>
-          <BehaviorTree ID="Test">
-            <Inverter>
-              <Action ID="False"/>
-            </Inverter>
-          </BehaviorTree>
-        </root>
-        """
-        tree = load_tree_from_string(xml)
-        assert tree.tick(Context()) is True
-
-    def test_parameterized_leaf(self, synthetic_leaves):
-        xml = """
-        <root>
-          <BehaviorTree ID="Test">
-            <Action ID="Above" threshold="3.5"/>
-          </BehaviorTree>
-        </root>
-        """
-        tree = load_tree_from_string(xml)
-        assert tree.tick(Context(value=5)) is True
-        assert tree.tick(Context(value=2)) is False
-
-    def test_malformed_xml_raises_tree_load_error(self):
-        with pytest.raises(TreeLoadError, match="Malformed XML"):
-            load_tree_from_string("<root><not closed")
-
-    def test_missing_behavior_tree_element(self, synthetic_leaves):
-        with pytest.raises(TreeLoadError, match="No <BehaviorTree>"):
-            load_tree_from_string("<root></root>")
-
-    def test_unknown_leaf_id(self, synthetic_leaves):
-        xml = """
-        <root>
-          <BehaviorTree ID="T">
-            <Action ID="DoesNotExist"/>
-          </BehaviorTree>
-        </root>
-        """
-        with pytest.raises(TreeLoadError, match="DoesNotExist"):
-            load_tree_from_string(xml)
-
+class TestMissingRequiredParam:
     def test_missing_required_param(self, synthetic_leaves):
-        # Re-register Above without a default to force the missing-param error.
+        # Re-register the Above leaf without a default to force the
+        # missing-param error to surface.
         clear_registry()
 
         @bt_condition(
@@ -232,57 +138,14 @@ class TestXmlLoader:
         def _strict(ctx, threshold: float) -> bool:
             return ctx.value > threshold
 
-        xml = """
-        <root>
-          <BehaviorTree ID="T">
-            <Action ID="StrictAbove"/>
-          </BehaviorTree>
-        </root>
-        """
+        doc = '{"root": {"type": "leaf", "id": "StrictAbove"}}'
         with pytest.raises(TreeLoadError, match="missing required parameter"):
-            load_tree_from_string(xml)
+            load_tree_from_json_string(doc)
         clear_registry()
-
-    def test_empty_composite_rejected(self, synthetic_leaves):
-        xml = """
-        <root>
-          <BehaviorTree ID="T">
-            <Sequence/>
-          </BehaviorTree>
-        </root>
-        """
-        with pytest.raises(TreeLoadError, match="no children"):
-            load_tree_from_string(xml)
-
-    def test_inverter_with_two_children_rejected(self, synthetic_leaves):
-        xml = """
-        <root>
-          <BehaviorTree ID="T">
-            <Inverter>
-              <Action ID="True"/>
-              <Action ID="False"/>
-            </Inverter>
-          </BehaviorTree>
-        </root>
-        """
-        with pytest.raises(TreeLoadError, match="exactly one child"):
-            load_tree_from_string(xml)
-
-    def test_two_root_nodes_rejected(self, synthetic_leaves):
-        xml = """
-        <root>
-          <BehaviorTree ID="T">
-            <Action ID="True"/>
-            <Action ID="False"/>
-          </BehaviorTree>
-        </root>
-        """
-        with pytest.raises(TreeLoadError, match="exactly one root node"):
-            load_tree_from_string(xml)
 
 
 # ---------------------------------------------------------------------------
-# JSON loader — the future format authored by the custom editor
+# JSON loader — the canonical tree format
 # ---------------------------------------------------------------------------
 class TestJsonLoader:
     def test_loads_simple_selector(self, synthetic_leaves):
@@ -419,22 +282,10 @@ class TestJsonLoader:
 
 
 # ---------------------------------------------------------------------------
-# Path-based dispatch
+# File-path loader
 # ---------------------------------------------------------------------------
-class TestLoadTreeDispatch:
-    def test_xml_extension_uses_xml_parser(self, synthetic_leaves, tmp_path):
-        from ai_tree.runtime import load_tree
-
-        path = tmp_path / "t.xml"
-        path.write_text("""
-        <root><BehaviorTree ID="T"><Action ID="True"/></BehaviorTree></root>
-        """, encoding="utf-8")
-        tree = load_tree(path)
-        assert tree.tick(Context()) is True
-
-    def test_json_extension_uses_json_parser(self, synthetic_leaves, tmp_path):
-        from ai_tree.runtime import load_tree
-
+class TestLoadTreeFromPath:
+    def test_loads_json_file(self, synthetic_leaves, tmp_path):
         path = tmp_path / "t.json"
         path.write_text(
             '{"name": "T", "root": {"type": "leaf", "id": "True"}}',
@@ -444,7 +295,5 @@ class TestLoadTreeDispatch:
         assert tree.tick(Context()) is True
 
     def test_missing_file_raises(self, tmp_path):
-        from ai_tree.runtime import load_tree
-
         with pytest.raises(TreeLoadError, match="not found"):
             load_tree(tmp_path / "nope.json")

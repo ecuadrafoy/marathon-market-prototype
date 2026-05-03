@@ -13,9 +13,16 @@ uv run python marathon_market.py --debug
 
 # Generate EV/yield/success analysis charts (saves success_rate_chart.png)
 uv run python charts.py
+
+# Run the test suite
+uv run pytest
+
+# Behaviour-tree workflow (see "AI behaviour trees" section below)
+uv run python scripts/publish_tree.py <tree_name>       # validate + publish a draft tree
 ```
 
-No test suite exists yet. Validate changes by running the simulator for several weeks and observing market behavior.
+Tests live in `tests/`. Run `uv run pytest` before every commit. Manual simulator
+runs validate feel/equilibrium that unit tests can't capture.
 
 ## Architecture
 
@@ -52,3 +59,61 @@ The quadratic multiplier is intentional — see `docs/yield_design.md` for the E
 - The continuous yield curve is prototype scaffolding for a future **loot table system** (discrete item rarities per zone). The formula interface — `resolve_runner` returning a `yield_value` float — is stable; the internals will be replaced.
 - Runner `skill` is a single composite float intentionally. It will expand into multi-stat compositions later; all formulas treat it as a black box.
 - Non-traded factions (MIDA, Arachne, UESC) and multi-zone monitoring are out of scope for this prototype.
+
+## AI behaviour trees
+
+Per-doctrine extraction and engagement decisions are driven by **behaviour trees**
+stored as JSON and validated through a publish gate before the simulator can load
+them. The system has four components:
+
+- **Engine:** `ai_tree/` — registry, composites (Sequence/Selector/Inverter), JSON
+  loader, and the publish gate. Engine code is game-agnostic.
+- **Game leaves:** `runner_sim/zone_sim/ai_conditions.py` — `@bt_condition`-decorated
+  Python functions like `HasUncommonLoot`, `CombatRatioAbove`. Each is a pure check
+  over a `Context` object. Adding a leaf = writing a function with the decorator;
+  it auto-registers on import.
+- **Trees:** `ai_trees/drafts/<name>.json` (work-in-progress) and
+  `ai_trees/published/<name>.json` (validated, runtime-loadable). One tree per
+  doctrine, per decision kind (`extraction_<doctrine>` / `encounter_<doctrine>`).
+- **Manifest:** `ai_trees/manifest.json` records each published tree's SHA256.
+  The runtime refuses to load anything missing or with a checksum mismatch — so
+  drafts can never silently leak into a sim run.
+
+### Tree JSON schema (nested)
+
+```json
+{
+  "name": "EncounterBalanced",
+  "root": {
+    "type": "selector",            // sequence | selector | inverter | leaf
+    "label": "BalancedEngageDecision",
+    "children": [                  // composites
+      {"type": "leaf", "id": "OpponentHelpless"},
+      {"type": "sequence", "children": [...]},
+      {"type": "inverter", "child": {...}},
+      {"type": "leaf", "id": "CombatRatioAbove", "params": {"threshold": 1.2}}
+    ]
+  },
+  "_layout": {...}                 // optional editor sidecar; runtime ignores
+}
+```
+
+### Authoring workflow (manual; visual editor planned)
+
+```
+1. (Optionally) edit ai_trees/drafts/<name>.json directly.
+
+2. uv run python scripts/publish_tree.py <name>
+   - if outputs unchanged from snapshot → publishes (copies to published/,
+     updates manifest.json with the new SHA256)
+   - if outputs changed → fails, prints which inputs differ
+   - rerun with --update-snapshot to bless the new behaviour
+
+3. uv run pytest && uv run python marathon_market.py
+   - tests/test_ai_tree_parity.py guards against snapshot drift in CI.
+```
+
+The publish gate runs four checks: schema validity, leaf-ID resolution, smoke
+load, and a snapshot-diff over a fixed grid (160 inputs for extraction trees,
+75 for encounter trees). Snapshots live next to each published tree as
+`<name>.snapshot.json` and are the durable behavioural spec.
