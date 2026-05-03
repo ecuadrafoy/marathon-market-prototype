@@ -12,7 +12,14 @@ import pytest
 
 from ai_tree.composites import Inverter, Leaf, Selector, Sequence, Status
 from ai_tree.context import Context
-from ai_tree.registry import ParamSpec, bt_action, bt_condition, clear_registry, get
+from ai_tree.registry import (
+    REGISTRY,
+    ParamSpec,
+    bt_action,
+    bt_condition,
+    clear_registry,
+    get,
+)
 from ai_tree.runtime import Tree, TreeLoadError, load_tree, load_tree_from_json_string
 
 
@@ -21,7 +28,13 @@ from ai_tree.runtime import Tree, TreeLoadError, load_tree, load_tree_from_json_
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def synthetic_leaves():
-    """Register four synthetic leaves and clean up afterwards."""
+    """Register four synthetic leaves and clean up afterwards.
+
+    Saves the existing REGISTRY (e.g., game leaves registered by
+    ai_conditions) before clearing, and restores it on teardown so
+    other test files aren't left with an empty registry.
+    """
+    saved = dict(REGISTRY)
     clear_registry()
 
     @bt_condition(name="True", category="Test")
@@ -47,6 +60,7 @@ def synthetic_leaves():
 
     yield
     clear_registry()
+    REGISTRY.update(saved)
 
 
 # ---------------------------------------------------------------------------
@@ -107,18 +121,21 @@ class TestLeafWithContextAndParams:
 
 class TestActionLeaf:
     def test_action_returning_none_is_success(self):
+        saved = dict(REGISTRY)
         clear_registry()
+        try:
+            @bt_action(name="Side")
+            def _side(ctx):
+                ctx["touched"] = True
+                return None
 
-        @bt_action(name="Side")
-        def _side(ctx):
-            ctx["touched"] = True
-            return None
-
-        leaf = Leaf(get("Side"))
-        ctx = Context()
-        assert leaf.tick(ctx) == Status.SUCCESS
-        assert ctx["touched"] is True
-        clear_registry()
+            leaf = Leaf(get("Side"))
+            ctx = Context()
+            assert leaf.tick(ctx) == Status.SUCCESS
+            assert ctx["touched"] is True
+        finally:
+            clear_registry()
+            REGISTRY.update(saved)
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +144,9 @@ class TestActionLeaf:
 class TestMissingRequiredParam:
     def test_missing_required_param(self, synthetic_leaves):
         # Re-register the Above leaf without a default to force the
-        # missing-param error to surface.
+        # missing-param error to surface. The synthetic_leaves fixture
+        # has already saved the outer registry; the local clear_registry()
+        # / clear_registry() pair is contained within that scope.
         clear_registry()
 
         @bt_condition(
@@ -141,7 +160,6 @@ class TestMissingRequiredParam:
         doc = '{"root": {"type": "leaf", "id": "StrictAbove"}}'
         with pytest.raises(TreeLoadError, match="missing required parameter"):
             load_tree_from_json_string(doc)
-        clear_registry()
 
 
 # ---------------------------------------------------------------------------

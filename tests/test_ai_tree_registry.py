@@ -16,10 +16,14 @@ from ai_tree.registry import (
 @pytest.fixture(autouse=True)
 def _clean_registry():
     """Each test starts with an empty REGISTRY so decorators in one test
-    don't leak into another."""
+    don't leak into another. The original contents (e.g., game leaves
+    registered by ai_conditions) are saved and restored on teardown so
+    other test files aren't left with an empty registry."""
+    saved = dict(REGISTRY)
     clear_registry()
     yield
     clear_registry()
+    REGISTRY.update(saved)
 
 
 class TestBtCondition:
