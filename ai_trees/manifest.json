@@ -1,42 +1,42 @@
 {
   "encounter_balanced": {
     "grid_size": 75,
-    "published_at": "2026-05-03T13:58:21+00:00",
-    "sha256": "a471c61d5a02127eb208acc7ab7cbc4403d93196ad845ca7a1085f7dbfe5beb1"
+    "published_at": "2026-05-03T14:17:02+00:00",
+    "sha256": "218881198920937148c89117a0c9bc252da52fbf4bef27a6aa5989a2dedc3f5c"
   },
   "encounter_cautious": {
     "grid_size": 75,
-    "published_at": "2026-05-03T13:58:21+00:00",
-    "sha256": "6b867362baf2d2416064d6893613c1788962d6a7b351cab5a5e3347b716f724a"
+    "published_at": "2026-05-03T14:17:01+00:00",
+    "sha256": "3edeca9b533fe1a010d3f01836ff12e73550777d7e5f299ac5af6f27743ddc8a"
   },
   "encounter_greedy": {
     "grid_size": 75,
-    "published_at": "2026-05-03T13:58:20+00:00",
-    "sha256": "e25a3ddca87f6ca9cd59d6785977cfd01d081f161f1c6aed9839be89236ff95a"
+    "published_at": "2026-05-03T14:17:01+00:00",
+    "sha256": "dd1ab996f9868a56f8699069b01414384debef5fb3762174bdac87f72e025d95"
   },
   "encounter_support": {
     "grid_size": 75,
-    "published_at": "2026-05-03T13:58:22+00:00",
-    "sha256": "14d3e65e4ed71385061279d82a34799d547677f3ce08292aae67ff7577bb0852"
+    "published_at": "2026-05-03T14:17:02+00:00",
+    "sha256": "0ca89f829d2a2f54e5198c8a3a223b610a85f405d7d44934ca4a8ded86876a41"
   },
   "extraction_balanced": {
     "grid_size": 160,
-    "published_at": "2026-05-03T13:58:20+00:00",
-    "sha256": "bd64f4b8176a8a0ba547e81812f5ea7301aa87277f54439f01b212cb0bbcdc68"
+    "published_at": "2026-05-03T14:17:00+00:00",
+    "sha256": "a4bcf39e1cfcde974760314d8bf2531a522bb84c0b8983ccb3bdf9f486e965a0"
   },
   "extraction_cautious": {
     "grid_size": 160,
-    "published_at": "2026-05-03T13:58:19+00:00",
-    "sha256": "8a0e9271ec3c76bdabc76eadcc4ce60808d6e43c9fee6e2d14b552f11a450909"
+    "published_at": "2026-05-03T14:16:59+00:00",
+    "sha256": "df0526dd5e516a152006b55f99f25f380637a7a592660b48683c28998999afd2"
   },
   "extraction_greedy": {
     "grid_size": 160,
-    "published_at": "2026-05-03T13:58:19+00:00",
-    "sha256": "9f00d282afc14528716cd3a760e584bcdabed8317e98e28f9f6dedf09d7ddd00"
+    "published_at": "2026-05-03T14:16:59+00:00",
+    "sha256": "0025a012e4c33c40e20740bc024ea56370eb7034b30621b51b70b59d3060ede0"
   },
   "extraction_support": {
     "grid_size": 160,
-    "published_at": "2026-05-03T13:58:20+00:00",
-    "sha256": "ae8182c22c1fcc5f7e55b4fe63192267637a882717128be7d87f501d98b15a7e"
+    "published_at": "2026-05-03T14:17:00+00:00",
+    "sha256": "3ad8411f724c7d70015c5760788935870fa48b8e5f1122d4e9b566efc716786c"
   }
 }

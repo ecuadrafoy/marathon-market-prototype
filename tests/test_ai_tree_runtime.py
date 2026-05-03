@@ -12,7 +12,12 @@ import pytest
 from ai_tree.composites import Inverter, Leaf, Selector, Sequence, Status
 from ai_tree.context import Context
 from ai_tree.registry import ParamSpec, bt_action, bt_condition, clear_registry, get
-from ai_tree.runtime import Tree, TreeLoadError, load_tree_from_string
+from ai_tree.runtime import (
+    Tree,
+    TreeLoadError,
+    load_tree_from_json_string,
+    load_tree_from_string,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -274,3 +279,172 @@ class TestXmlLoader:
         """
         with pytest.raises(TreeLoadError, match="exactly one root node"):
             load_tree_from_string(xml)
+
+
+# ---------------------------------------------------------------------------
+# JSON loader — the future format authored by the custom editor
+# ---------------------------------------------------------------------------
+class TestJsonLoader:
+    def test_loads_simple_selector(self, synthetic_leaves):
+        doc = """
+        {
+          "name": "Test",
+          "root": {
+            "type": "selector",
+            "children": [
+              {"type": "leaf", "id": "False"},
+              {"type": "leaf", "id": "True"}
+            ]
+          }
+        }
+        """
+        tree = load_tree_from_json_string(doc)
+        assert tree.name == "Test"
+        assert tree.tick(Context()) is True
+
+    def test_nested_sequence_in_selector(self, synthetic_leaves):
+        doc = """
+        {
+          "root": {
+            "type": "selector",
+            "children": [
+              {
+                "type": "sequence",
+                "children": [
+                  {"type": "leaf", "id": "ReadFlag"},
+                  {"type": "leaf", "id": "True"}
+                ]
+              },
+              {"type": "leaf", "id": "False"}
+            ]
+          }
+        }
+        """
+        tree = load_tree_from_json_string(doc)
+        assert tree.tick(Context(flag=True)) is True
+        assert tree.tick(Context(flag=False)) is False
+
+    def test_inverter_decorator(self, synthetic_leaves):
+        doc = """
+        {
+          "root": {
+            "type": "inverter",
+            "child": {"type": "leaf", "id": "False"}
+          }
+        }
+        """
+        tree = load_tree_from_json_string(doc)
+        assert tree.tick(Context()) is True
+
+    def test_leaf_with_params(self, synthetic_leaves):
+        doc = """
+        {
+          "root": {
+            "type": "leaf",
+            "id": "Above",
+            "params": {"threshold": 3.5}
+          }
+        }
+        """
+        tree = load_tree_from_json_string(doc)
+        assert tree.tick(Context(value=5)) is True
+        assert tree.tick(Context(value=2)) is False
+
+    def test_leaf_uses_param_default_when_missing(self, synthetic_leaves):
+        # Above has default threshold=0.0 — value=1 should clear it.
+        doc = """
+        {
+          "root": {"type": "leaf", "id": "Above"}
+        }
+        """
+        tree = load_tree_from_json_string(doc)
+        assert tree.tick(Context(value=1)) is True
+
+    def test_label_is_preserved_on_composites(self, synthetic_leaves):
+        doc = """
+        {
+          "root": {
+            "type": "sequence",
+            "label": "MyImportantSequence",
+            "children": [{"type": "leaf", "id": "True"}]
+          }
+        }
+        """
+        tree = load_tree_from_json_string(doc)
+        assert tree.root.name == "MyImportantSequence"
+
+    def test_layout_field_is_ignored(self, synthetic_leaves):
+        """Editor-only sidecar data must not affect runtime parsing."""
+        doc = """
+        {
+          "root": {"type": "leaf", "id": "True"},
+          "_layout": {"any": "data", "even": [1, 2, 3]}
+        }
+        """
+        tree = load_tree_from_json_string(doc)
+        assert tree.tick(Context()) is True
+
+    def test_malformed_json_raises(self):
+        with pytest.raises(TreeLoadError, match="Malformed JSON"):
+            load_tree_from_json_string("{not valid json")
+
+    def test_missing_root_field_raises(self, synthetic_leaves):
+        with pytest.raises(TreeLoadError, match="missing 'root'"):
+            load_tree_from_json_string('{"name": "T"}')
+
+    def test_unknown_node_type_raises(self, synthetic_leaves):
+        doc = '{"root": {"type": "parallel", "children": []}}'
+        with pytest.raises(TreeLoadError, match="Unknown node type"):
+            load_tree_from_json_string(doc)
+
+    def test_unknown_leaf_id_raises(self, synthetic_leaves):
+        doc = '{"root": {"type": "leaf", "id": "DoesNotExist"}}'
+        with pytest.raises(TreeLoadError, match="DoesNotExist"):
+            load_tree_from_json_string(doc)
+
+    def test_empty_composite_rejected(self, synthetic_leaves):
+        doc = '{"root": {"type": "sequence", "children": []}}'
+        with pytest.raises(TreeLoadError, match="non-empty 'children'"):
+            load_tree_from_json_string(doc)
+
+    def test_inverter_missing_child_rejected(self, synthetic_leaves):
+        doc = '{"root": {"type": "inverter"}}'
+        with pytest.raises(TreeLoadError, match="requires a 'child'"):
+            load_tree_from_json_string(doc)
+
+    def test_leaf_missing_id_rejected(self, synthetic_leaves):
+        doc = '{"root": {"type": "leaf"}}'
+        with pytest.raises(TreeLoadError, match="missing 'id'"):
+            load_tree_from_json_string(doc)
+
+
+# ---------------------------------------------------------------------------
+# Path-based dispatch
+# ---------------------------------------------------------------------------
+class TestLoadTreeDispatch:
+    def test_xml_extension_uses_xml_parser(self, synthetic_leaves, tmp_path):
+        from ai_tree.runtime import load_tree
+
+        path = tmp_path / "t.xml"
+        path.write_text("""
+        <root><BehaviorTree ID="T"><Action ID="True"/></BehaviorTree></root>
+        """, encoding="utf-8")
+        tree = load_tree(path)
+        assert tree.tick(Context()) is True
+
+    def test_json_extension_uses_json_parser(self, synthetic_leaves, tmp_path):
+        from ai_tree.runtime import load_tree
+
+        path = tmp_path / "t.json"
+        path.write_text(
+            '{"name": "T", "root": {"type": "leaf", "id": "True"}}',
+            encoding="utf-8",
+        )
+        tree = load_tree(path)
+        assert tree.tick(Context()) is True
+
+    def test_missing_file_raises(self, tmp_path):
+        from ai_tree.runtime import load_tree
+
+        with pytest.raises(TreeLoadError, match="not found"):
+            load_tree(tmp_path / "nope.json")

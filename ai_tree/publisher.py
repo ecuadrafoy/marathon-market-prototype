@@ -57,7 +57,7 @@ def load_published(name: str) -> Tree:
             f"Tree {name!r} is not in the manifest. "
             f"Run `uv run python scripts/publish_tree.py {name}` to publish it."
         )
-    path = PUBLISHED_DIR / f"{name}.xml"
+    path = PUBLISHED_DIR / f"{name}.json"
     if not path.exists():
         raise UnverifiedTreeError(
             f"Published tree file is missing: {path}. "
@@ -336,8 +336,8 @@ def publish(
         Used for first-time publish during migration so the published tree
         is provably equivalent to the original code at publish time.
     """
-    draft_path = DRAFTS_DIR / f"{name}.xml"
-    published_path = PUBLISHED_DIR / f"{name}.xml"
+    draft_path = DRAFTS_DIR / f"{name}.json"
+    published_path = PUBLISHED_DIR / f"{name}.json"
     snapshot_path = PUBLISHED_DIR / f"{name}.snapshot.json"
 
     # Lint

@@ -1,0 +1,50 @@
+{
+  "name": "EncounterBalanced",
+  "root": {
+    "type": "selector",
+    "children": [
+      {
+        "type": "leaf",
+        "id": "OpponentHelpless"
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "CarryingHighValue"
+          },
+          {
+            "type": "leaf",
+            "id": "CombatRatioAbove",
+            "params": {
+              "threshold": 1.2
+            }
+          }
+        ],
+        "label": "HighValueGuarded"
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "inverter",
+            "child": {
+              "type": "leaf",
+              "id": "CarryingHighValue"
+            }
+          },
+          {
+            "type": "leaf",
+            "id": "CombatRatioAbove",
+            "params": {
+              "threshold": 0.9
+            }
+          }
+        ],
+        "label": "StandardEvenOdds"
+      }
+    ],
+    "label": "BalancedEngageDecision"
+  }
+}

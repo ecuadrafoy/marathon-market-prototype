@@ -1,0 +1,47 @@
+{
+  "name": "EncounterSupport",
+  "root": {
+    "type": "selector",
+    "children": [
+      {
+        "type": "leaf",
+        "id": "OpponentHelpless"
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "CarryingAnything"
+          },
+          {
+            "type": "leaf",
+            "id": "CombatRatioAbove",
+            "params": {
+              "threshold": 1.8
+            }
+          }
+        ],
+        "label": "CarryingAnything"
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "CarryingNothing"
+          },
+          {
+            "type": "leaf",
+            "id": "CombatRatioAbove",
+            "params": {
+              "threshold": 1.5
+            }
+          }
+        ],
+        "label": "EmptyHands"
+      }
+    ],
+    "label": "SupportEngageDecision"
+  }
+}

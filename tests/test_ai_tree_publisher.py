@@ -7,6 +7,7 @@ Covers:
 - --bless-from-legacy bootstraps the snapshot from a legacy function
 - Manifest is written/updated correctly
 - Grid generators produce stable, deterministic IDs
+- load_published enforces the manifest SHA gate
 """
 
 import json
@@ -37,30 +38,29 @@ def isolated_tree_dirs(tmp_path, monkeypatch):
 
 
 def _write_draft(drafts: Path, name: str, body: str) -> Path:
-    path = drafts / f"{name}.xml"
+    path = drafts / f"{name}.json"
     path.write_text(body, encoding="utf-8")
     return path
 
 
 # A minimal valid extraction tree: extract iff IsFinalTick
-_MINIMAL_EXTRACTION = """
-<root BTCPP_format="4">
-  <BehaviorTree ID="T">
-    <Condition ID="IsFinalTick"/>
-  </BehaviorTree>
-</root>
-""".strip()
+_MINIMAL_EXTRACTION = json.dumps({
+    "name": "T",
+    "root": {"type": "leaf", "id": "IsFinalTick"},
+})
 
-# Same logical behaviour as above but reordered — used for snapshot-diff tests
-_EQUIVALENT_EXTRACTION = """
-<root BTCPP_format="4">
-  <BehaviorTree ID="T">
-    <Selector>
-      <Condition ID="IsFinalTick"/>
-    </Selector>
-  </BehaviorTree>
-</root>
-""".strip()
+# A tree that always succeeds — behaviourally different, used for snapshot-diff tests
+_ALWAYS_EXTRACT = json.dumps({
+    "name": "T",
+    "root": {
+        "type": "selector",
+        "children": [
+            {"type": "leaf", "id": "IsFinalTick"},
+            {"type": "leaf", "id": "CarryingNothing"},
+            {"type": "leaf", "id": "CarryingAnything"},
+        ],
+    },
+})
 
 
 # ---------------------------------------------------------------------------
@@ -115,23 +115,21 @@ class TestNaming:
 # ---------------------------------------------------------------------------
 class TestLint:
     def test_missing_file(self, tmp_path):
-        result = pub.lint(tmp_path / "nope.xml")
+        result = pub.lint(tmp_path / "nope.json")
         assert result[0] is None
         assert any(d.check == "schema" and "not found" in d.message
                    for d in result[1])
 
-    def test_malformed_xml(self, isolated_tree_dirs):
+    def test_malformed_json(self, isolated_tree_dirs):
         drafts, _, _ = isolated_tree_dirs
-        path = _write_draft(drafts, "extraction_cautious", "<root><not closed")
+        path = _write_draft(drafts, "extraction_cautious", "{not valid json")
         tree, diags = pub.lint(path)
         assert tree is None
-        assert any("Malformed XML" in d.message for d in diags)
+        assert any("Malformed JSON" in d.message for d in diags)
 
     def test_unknown_leaf(self, isolated_tree_dirs):
         drafts, _, _ = isolated_tree_dirs
-        body = """
-        <root><BehaviorTree ID="T"><Condition ID="DoesNotExist"/></BehaviorTree></root>
-        """
+        body = json.dumps({"root": {"type": "leaf", "id": "DoesNotExist"}})
         path = _write_draft(drafts, "extraction_cautious", body)
         tree, diags = pub.lint(path)
         assert tree is None
@@ -150,7 +148,7 @@ class TestPublishFirstTime:
 
         assert result.success, result.report()
         assert result.snapshot_updated is True
-        assert (published / "extraction_cautious.xml").exists()
+        assert (published / "extraction_cautious.json").exists()
         assert (published / "extraction_cautious.snapshot.json").exists()
         assert manifest_path.exists()
 
@@ -194,18 +192,7 @@ class TestPublishSecondTime:
         first = pub.publish("extraction_cautious")
         assert first.success
 
-        # Replace with a tree that always returns SUCCESS (always extract) —
-        # behaviourally different.
-        always_extract = """
-        <root><BehaviorTree ID="T">
-          <Selector>
-            <Condition ID="IsFinalTick"/>
-            <Condition ID="CarryingNothing"/>
-            <Condition ID="CarryingAnything"/>
-          </Selector>
-        </BehaviorTree></root>
-        """
-        _write_draft(drafts, "extraction_cautious", always_extract)
+        _write_draft(drafts, "extraction_cautious", _ALWAYS_EXTRACT)
         second = pub.publish("extraction_cautious")
         assert not second.success
         assert any(d.check == "snapshot" for d in second.diagnostics)
@@ -215,16 +202,7 @@ class TestPublishSecondTime:
         _write_draft(drafts, "extraction_cautious", _MINIMAL_EXTRACTION)
         pub.publish("extraction_cautious")
 
-        always_extract = """
-        <root><BehaviorTree ID="T">
-          <Selector>
-            <Condition ID="IsFinalTick"/>
-            <Condition ID="CarryingNothing"/>
-            <Condition ID="CarryingAnything"/>
-          </Selector>
-        </BehaviorTree></root>
-        """
-        _write_draft(drafts, "extraction_cautious", always_extract)
+        _write_draft(drafts, "extraction_cautious", _ALWAYS_EXTRACT)
         result = pub.publish("extraction_cautious", update_snapshot=True)
         assert result.success
         assert result.snapshot_updated is True
@@ -287,9 +265,9 @@ class TestLoadPublished:
         pub.publish("extraction_cautious")
 
         # Simulate someone hand-editing the published file after publish
-        published_path = published / "extraction_cautious.xml"
+        published_path = published / "extraction_cautious.json"
         published_path.write_text(
-            published_path.read_text(encoding="utf-8") + "\n<!-- tampered -->",
+            published_path.read_text(encoding="utf-8") + "\n",
             encoding="utf-8",
         )
 
@@ -302,7 +280,7 @@ class TestLoadPublished:
         pub.publish("extraction_cautious")
 
         # Manifest entry exists but the file got deleted somehow
-        (published / "extraction_cautious.xml").unlink()
+        (published / "extraction_cautious.json").unlink()
 
         with pytest.raises(pub.UnverifiedTreeError, match="missing"):
             pub.load_published("extraction_cautious")
