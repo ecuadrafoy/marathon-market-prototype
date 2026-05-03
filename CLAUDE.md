@@ -18,7 +18,8 @@ uv run python charts.py
 uv run pytest
 
 # Behaviour-tree workflow (see "AI behaviour trees" section below)
-uv run python scripts/publish_tree.py <tree_name>       # validate + publish a draft tree
+uv run python -m ai_tree.server                         # launch the visual editor at http://localhost:8765/
+uv run python scripts/publish_tree.py <tree_name>       # validate + publish a draft tree (CLI alternative)
 ```
 
 Tests live in `tests/`. Run `uv run pytest` before every commit. Manual simulator
@@ -98,14 +99,22 @@ them. The system has four components:
 }
 ```
 
-### Authoring workflow (manual; visual editor planned)
+### Authoring workflow
 
 ```
-1. (Optionally) edit ai_trees/drafts/<name>.json directly.
+1. uv run python -m ai_tree.server
+   - Opens an HTTP server at http://localhost:8765/ serving the
+     visual editor (vanilla HTML + LiteGraph.js).
+   - Pick a tree from the dropdown, click Load, edit visually,
+     click Save Draft and then Publish. Diagnostics appear in
+     the right sidebar inline. Stop the server with Ctrl+C.
+   - Click "Refresh palette" after adding/removing leaves so the
+     palette picks up changes from ai_conditions.py.
 
-2. uv run python scripts/publish_tree.py <name>
-   - if outputs unchanged from snapshot → publishes (copies to published/,
-     updates manifest.json with the new SHA256)
+2. CLI alternative for batch / scripted publishing:
+   uv run python scripts/publish_tree.py <name>
+   - if outputs unchanged from snapshot → publishes (copies to
+     published/, updates manifest.json with the new SHA256)
    - if outputs changed → fails, prints which inputs differ
    - rerun with --update-snapshot to bless the new behaviour
 
