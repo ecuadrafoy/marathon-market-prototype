@@ -1,7 +1,8 @@
 {
-  "name": "EncounterBalanced",
+  "name": "encounter_balanced",
   "root": {
     "type": "selector",
+    "label": "BalancedEngageDecision",
     "children": [
       {
         "type": "leaf",
@@ -9,6 +10,7 @@
       },
       {
         "type": "sequence",
+        "label": "HighValueGuarded",
         "children": [
           {
             "type": "leaf",
@@ -21,11 +23,11 @@
               "threshold": 1.2
             }
           }
-        ],
-        "label": "HighValueGuarded"
+        ]
       },
       {
         "type": "sequence",
+        "label": "StandardEvenOdds",
         "children": [
           {
             "type": "inverter",
@@ -41,10 +43,46 @@
               "threshold": 0.9
             }
           }
-        ],
-        "label": "StandardEvenOdds"
+        ]
       }
-    ],
-    "label": "BalancedEngageDecision"
+    ]
+  },
+  "_layout": {
+    "1": {
+      "x": 100,
+      "y": 100
+    },
+    "2": {
+      "x": -120,
+      "y": 240
+    },
+    "3": {
+      "x": 100,
+      "y": 240
+    },
+    "4": {
+      "x": -10,
+      "y": 380
+    },
+    "5": {
+      "x": 210,
+      "y": 380
+    },
+    "6": {
+      "x": 320,
+      "y": 240
+    },
+    "7": {
+      "x": 210,
+      "y": 380
+    },
+    "8": {
+      "x": 210,
+      "y": 500
+    },
+    "9": {
+      "x": 430,
+      "y": 380
+    }
   }
 }
