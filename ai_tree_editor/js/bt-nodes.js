@@ -116,12 +116,12 @@ const BTNodes = (() => {
 
   function registerLeaves(catalog) {
     // Drop any previously registered bt/leaf types so re-running the
-    // palette refresh doesn't pile up duplicates.
+    // palette refresh doesn't pile up duplicates. Snapshot the keys first
+    // because unregisterNodeType mutates the same map we're scanning.
     const existing = LiteGraph.registered_node_types || {};
-    for (const key of Object.keys(existing)) {
-      if (key.startsWith("bt/leaf/")) {
-        LiteGraph.unregisterNodeType(key);
-      }
+    const stale = Object.keys(existing).filter((k) => k.startsWith("bt/leaf/"));
+    for (const key of stale) {
+      LiteGraph.unregisterNodeType(key);
     }
     for (const spec of catalog.leaves) {
       const path = `bt/leaf/${spec.name}`;

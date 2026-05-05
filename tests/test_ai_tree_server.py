@@ -267,3 +267,66 @@ class TestUnknownRoutes:
     def test_unknown_put_returns_404(self, running_server):
         status, _ = _put(f"{running_server}/something", {})
         assert status == 404
+
+
+# ---------------------------------------------------------------------------
+# Static file serving
+# ---------------------------------------------------------------------------
+def _get_raw(url: str) -> tuple[int, bytes, str]:
+    """Lower-level GET that returns raw bytes + content-type, used for
+    static-file checks where the body isn't JSON."""
+    try:
+        with urllib.request.urlopen(url) as resp:
+            return resp.status, resp.read(), resp.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers.get("Content-Type", "") if e.headers else ""
+
+
+class TestStaticFiles:
+    def test_root_serves_index_html(self, running_server):
+        status, body, ctype = _get_raw(f"{running_server}/")
+        assert status == 200
+        assert ctype.startswith("text/html")
+        assert b"<!DOCTYPE html>" in body
+        assert b"Behaviour Tree Editor" in body
+
+    def test_index_html_explicit_path(self, running_server):
+        status, _, ctype = _get_raw(f"{running_server}/index.html")
+        assert status == 200
+        assert ctype.startswith("text/html")
+
+    def test_javascript_assets_have_correct_content_type(self, running_server):
+        status, body, ctype = _get_raw(f"{running_server}/js/api.js")
+        assert status == 200
+        assert ctype.startswith("application/javascript")
+        # Sanity: api.js exposes BTApi
+        assert b"BTApi" in body
+
+    def test_css_assets_have_correct_content_type(self, running_server):
+        status, _, ctype = _get_raw(f"{running_server}/css/editor.css")
+        assert status == 200
+        assert ctype.startswith("text/css")
+
+    def test_missing_static_file_returns_404(self, running_server):
+        status, _, _ = _get_raw(f"{running_server}/js/does_not_exist.js")
+        assert status == 404
+
+    def test_path_traversal_attempt_is_rejected(self, running_server):
+        # ../ should not let the request escape the editor root.
+        # The server resolves the path and rejects anything outside EDITOR_DIR.
+        status, _, _ = _get_raw(f"{running_server}/../CLAUDE.md")
+        # urllib normalises the URL before sending, so this either becomes
+        # / (root → 200 index.html) or stays as ../ which the server rejects.
+        # Either way, we never get the content of CLAUDE.md.
+        assert status in (200, 403, 404)
+        # The crucial assertion: even if the request reached the handler,
+        # the handler did not serve CLAUDE.md.
+        if status == 200:
+            _, body, _ = _get_raw(f"{running_server}/../CLAUDE.md")
+            assert b"# CLAUDE.md" not in body
+
+    def test_encoded_path_traversal_is_rejected(self, running_server):
+        # Percent-encoded ../ should not bypass the static root check.
+        status, body, _ = _get_raw(f"{running_server}/%2e%2e/CLAUDE.md")
+        assert status in (403, 404)
+        assert b"# CLAUDE.md" not in body
