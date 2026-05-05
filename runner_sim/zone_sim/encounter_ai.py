@@ -42,15 +42,24 @@ def should_engage(
 
     Dispatches to the published encounter tree for the squad's doctrine. The
     tree weighs combat odds against carried loot value with doctrine-specific
-    thresholds; see `ai_trees/published/encounter_<doctrine>.xml` for the
+    thresholds; see `ai_trees/published/encounter_<doctrine>.json` for the
     authoritative logic.
+
+    When `Tracer.enable()` has been called (typically via the simulator's
+    `--trace-ai` flag), one line per decision is printed to stdout.
     """
     from ai_tree.context import Context
+    from ai_tree.trace import Tracer, format_engage
     ctx = Context(
         own_combat=own_combat,
         opponent_combat_estimate=opponent_combat_estimate,
         loot=own_loot,
     )
-    return _get_encounter_tree(doctrine).tick(ctx)
+    result = _get_encounter_tree(doctrine).tick(ctx)
+    if Tracer.enabled:
+        Tracer.emit(format_engage(
+            doctrine.value, result, own_combat, opponent_combat_estimate, own_loot,
+        ))
+    return result
 
 

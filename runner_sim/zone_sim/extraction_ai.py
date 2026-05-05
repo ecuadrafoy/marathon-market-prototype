@@ -173,12 +173,19 @@ def should_extract(
 ) -> bool:
     """Return True if the squad should extract this tick.
 
-    Dispatches to the published behaviour tree for the squad's doctrine. Trees
-    are authored visually in Groot2, validated by the publish gate, and loaded
-    here only after their manifest checksum verifies.
+    Dispatches to the published behaviour tree for the squad's doctrine.
+    Trees are authored in the visual editor, validated by the publish gate,
+    and loaded here only after their manifest checksum verifies.
+
+    When `Tracer.enable()` has been called (typically via the simulator's
+    `--trace-ai` flag), one line per decision is printed to stdout.
     """
     from ai_tree.context import Context
+    from ai_tree.trace import Tracer, format_extract
     ctx = Context(loot=loot, perception=perception)
-    return _get_extraction_tree(doctrine).tick(ctx)
+    result = _get_extraction_tree(doctrine).tick(ctx)
+    if Tracer.enabled:
+        Tracer.emit(format_extract(doctrine.value, result, loot, perception))
+    return result
 
 

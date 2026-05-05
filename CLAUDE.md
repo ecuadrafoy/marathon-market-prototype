@@ -11,6 +11,10 @@ uv run python marathon_market.py
 # Run with debug mode (reveals all hidden zones in results)
 uv run python marathon_market.py --debug
 
+# Run with AI tracing — every BT extract/engage decision is printed
+uv run python marathon_market.py --trace-ai
+uv run python -m runner_sim.zone_sim.harness --seed 42 --trace-ai
+
 # Generate EV/yield/success analysis charts (saves success_rate_chart.png)
 uv run python charts.py
 

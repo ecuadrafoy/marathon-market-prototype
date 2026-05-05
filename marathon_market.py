@@ -580,6 +580,10 @@ def print_session_end(week: int, portfolio: Portfolio, prices: dict[str, float])
 # ---------------------------------------------------------------------------
 def run_game() -> None:
     debug = "--debug" in sys.argv
+    trace_ai = "--trace-ai" in sys.argv
+    if trace_ai:
+        from ai_tree.trace import Tracer
+        Tracer.enable()
 
     print("\n" + "=" * 52)
     print("   MARATHON MARKET SIMULATOR")
@@ -587,6 +591,8 @@ def run_game() -> None:
     print("=" * 52)
     if debug:
         print("   [DEBUG MODE — shell market and full roster visible]")
+    if trace_ai:
+        print("   [TRACE-AI — every behaviour-tree decision is printed]")
     print(f"\nStarting capital: {_fmt_cr(STARTING_CREDITS)}")
     print(f"Zones: {len(ZONES)} total  |  Monitoring: 1  |  Press Q to quit")
 
