@@ -1,17 +1,18 @@
 """Composite and leaf node classes for the behaviour-tree walker.
 
-The semantics follow the standard BehaviorTree.CPP / Groot model:
+Standard behaviour-tree semantics:
+
 - **Sequence** ticks children left-to-right, returning FAILURE on the first
   failure; otherwise SUCCESS. (Reads as "AND".)
-- **Selector** (alias: Fallback) ticks children left-to-right, returning
-  SUCCESS on the first success; otherwise FAILURE. (Reads as "OR".)
+- **Selector** ticks children left-to-right, returning SUCCESS on the first
+  success; otherwise FAILURE. (Reads as "OR".)
 - **Inverter** wraps a single child and flips SUCCESS ↔ FAILURE.
 - **Leaf** wraps a registered Condition or Action. A Condition's returned
   bool maps True → SUCCESS, False → FAILURE.
 
-RUNNING is included in the Status enum for future async/long-running actions
-but is not produced by any composite currently — every tick of every node
-yields a terminal Status today.
+RUNNING is included in the Status enum for future async / long-running
+actions but is not produced by any composite currently — every tick of
+every node yields a terminal Status today.
 """
 
 from __future__ import annotations
@@ -54,11 +55,7 @@ class Sequence(Node):
 
 
 class Selector(Node):
-    """OR across children. Returns SUCCESS on the first child that succeeds.
-
-    Groot/BT.CPP calls this Fallback in its XML. The XML loader accepts both
-    <Selector> and <Fallback> tags and constructs the same node type.
-    """
+    """OR across children. Returns SUCCESS on the first child that succeeds."""
 
     def __init__(self, children: list[Node], name: str = "") -> None:
         self.children = children

@@ -2,12 +2,12 @@
 
 Leaf nodes are Python functions decorated with `@bt_condition` or `@bt_action`.
 The decorator records a NodeSpec in the global REGISTRY at import time, so any
-module that defines leaves only needs to be imported once for the catalog
-generator and runtime to see every available node.
+module that defines leaves only needs to be imported once for the editor and
+runtime to see every available node.
 
-The catalog generator (scripts/generate_models_xml.py) walks REGISTRY to build
-the Groot2 palette XML. The runtime (ai_tree.runtime) looks up leaves by name
-when constructing a tree from XML.
+The editor server (ai_tree.server) walks REGISTRY to serve `/catalog`, which
+populates the visual editor's palette. The runtime (ai_tree.runtime) looks up
+leaves by name when constructing a Tree from JSON.
 """
 
 from __future__ import annotations
@@ -19,9 +19,10 @@ from typing import Any, Callable
 class NodeKind(str, Enum):
     """Whether a leaf returns a boolean (Condition) or performs an effect (Action).
 
-    The runtime treats both as Leaf nodes — the distinction exists so that the
-    Groot palette can group/colour them differently, and so that future static
-    checks can warn if an Action is used where a Condition is expected.
+    The runtime treats both as Leaf nodes — the distinction exists so the
+    editor's palette can group and colour them differently, and so that
+    future static checks can warn if an Action is used where a Condition
+    is expected.
     """
     CONDITION = "condition"
     ACTION = "action"
@@ -32,9 +33,9 @@ class ParamSpec:
     """A configurable parameter on a leaf node instance.
 
     Example: TimePressureAbove takes `threshold: float` so each placement of
-    that node in a tree can have its own value. The catalog generator emits
-    these as <input_port> entries in models.xml so Groot exposes them as
-    editable fields in the property panel.
+    that node in a tree can have its own value. The catalog endpoint exposes
+    these so the editor renders them as editable fields in its property
+    panel; tree JSON stores them under a leaf's `params` object.
     """
     name: str
     type: type           # float, int, str, bool — kept simple on purpose
@@ -45,7 +46,7 @@ class ParamSpec:
 @dataclass(frozen=True)
 class NodeSpec:
     """Everything the catalog and runtime need to know about one leaf."""
-    name: str                                  # the Groot ID, e.g. "HasUncommonLoot"
+    name: str                                  # the leaf ID, e.g. "HasUncommonLoot"
     kind: NodeKind
     category: str                              # for palette grouping
     description: str

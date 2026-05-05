@@ -3,7 +3,8 @@
 Every published tree's outputs must still match its blessed snapshot file.
 The publish gate enforces this at publish time; this pytest ensures CI also
 catches drift caused by changes to leaf functions, composite semantics, or
-tree XML that didn't go through `scripts/publish_tree.py`.
+tree files that were edited directly without going through
+`scripts/publish_tree.py` (or, equivalently, the editor's Publish button).
 
 If a test fails, the fix is one of:
 - Re-publish the tree if the change was intentional:

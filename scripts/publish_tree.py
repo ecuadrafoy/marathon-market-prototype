@@ -64,7 +64,7 @@ def _make_legacy_blesser(name: str):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish a draft behaviour tree.")
-    parser.add_argument("name", help="Tree name without .xml extension")
+    parser.add_argument("name", help="Tree name without .json extension")
     parser.add_argument("--update-snapshot", action="store_true",
                         help="Bless the current tree output as the new snapshot")
     parser.add_argument("--bless-from-legacy", action="store_true",

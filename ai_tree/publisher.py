@@ -3,16 +3,16 @@
 A draft tree (in `ai_trees/drafts/`) is only allowed to enter `ai_trees/published/`
 after passing four checks:
 
-1. **Schema**     — the XML parses and conforms to our composite/leaf vocabulary
+1. **Schema**     — the JSON parses and conforms to our composite/leaf schema
 2. **Registry**   — every leaf ID exists; required parameters are supplied
-3. **Smoke load** — the runtime can construct the full Tree from the XML
+3. **Smoke load** — the runtime can construct the full Tree from the JSON
 4. **Snapshot**   — evaluating the tree on a fixed input grid matches the
                     sibling `*.snapshot.json` exactly (or `--update-snapshot`
                     was passed to bless a deliberate change)
 
 Once all four pass, the draft is copied to `published/`, the snapshot file is
 written (or refreshed), and `manifest.json` is updated with a SHA256 of the
-published XML. The runtime refuses to load any tree absent from the manifest
+published file. The runtime refuses to load any tree absent from the manifest
 or whose checksum doesn't match — so unpublished work-in-progress trees can't
 silently leak into a sim run.
 """

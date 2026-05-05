@@ -2,8 +2,9 @@
 
 Each function is a pure check over fields on the Context object. Importing
 this module is what populates the global REGISTRY with the leaves that the
-extraction and encounter trees compose. The catalog generator imports it
-to build Groot's palette; the runtime imports it before loading any tree.
+extraction and encounter trees compose. The editor server imports it to
+populate the `/catalog` endpoint; the runtime imports it before loading
+any tree.
 
 Context shape (depending on tree kind):
 - extraction trees: ctx.loot, ctx.perception
