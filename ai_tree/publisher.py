@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 from .context import Context
 from .runtime import Tree, TreeLoadError, load_tree
@@ -323,18 +323,12 @@ def publish(
     name: str,
     *,
     update_snapshot: bool = False,
-    bless_from_legacy: Callable[[TreeKind, Iterable[tuple[str, Context]]],
-                                dict[str, bool]] | None = None,
 ) -> PublishResult:
     """Validate and publish the named draft tree.
 
     name: bare tree name (no extension), e.g. "extraction_cautious"
     update_snapshot: regenerate the snapshot from the tree's current outputs,
         bypassing the diff check. Use when intentionally changing behaviour.
-    bless_from_legacy: callable that, given (kind, grid), returns the
-        snapshot dict computed by the *legacy* should_extract / should_engage.
-        Used for first-time publish during migration so the published tree
-        is provably equivalent to the original code at publish time.
     """
     draft_path = DRAFTS_DIR / f"{name}.json"
     published_path = PUBLISHED_DIR / f"{name}.json"
@@ -364,11 +358,7 @@ def publish(
     # Determine expected snapshot
     snapshot_existed = snapshot_path.exists()
     snapshot_updated = False
-    if bless_from_legacy is not None and not snapshot_existed:
-        # Bootstrap: the legacy implementation defines the contract for first publish.
-        expected = bless_from_legacy(kind, grid_for(kind))
-        snapshot_updated = True
-    elif update_snapshot or not snapshot_existed:
+    if update_snapshot or not snapshot_existed:
         expected = actual
         snapshot_updated = True
     else:
@@ -385,15 +375,6 @@ def publish(
                     Severity.ERROR, "snapshot",
                     f"... and {len(diffs) - 20} more differences (truncated)"
                 ))
-            return PublishResult(name=name, success=False, diagnostics=diags,
-                                 grid_size=len(actual))
-    else:
-        # Bootstrap or --update-snapshot — make sure the tree at least matches
-        # the expected (which is either legacy-blessed or the tree's own output).
-        diffs = diff_snapshots(expected, actual)
-        if diffs and bless_from_legacy is not None:
-            for line in diffs[:20]:
-                diags.append(Diagnostic(Severity.ERROR, "legacy_parity", line))
             return PublishResult(name=name, success=False, diagnostics=diags,
                                  grid_size=len(actual))
 

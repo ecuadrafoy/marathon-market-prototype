@@ -4,7 +4,6 @@ Covers:
 - Lint catches schema, missing-leaf, parameter-missing errors
 - Snapshot diff catches behavioural drift
 - --update-snapshot blesses changes
-- --bless-from-legacy bootstraps the snapshot from a legacy function
 - Manifest is written/updated correctly
 - Grid generators produce stable, deterministic IDs
 - load_published enforces the manifest SHA gate
@@ -155,24 +154,6 @@ class TestPublishFirstTime:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert "extraction_cautious" in manifest
         assert manifest["extraction_cautious"]["grid_size"] == 160
-
-    def test_first_publish_with_bless_from_legacy(self, isolated_tree_dirs):
-        """The bless-from-legacy path generates the snapshot from a custom callable
-        (used in production to make the migration provably equivalent)."""
-        drafts, published, _ = isolated_tree_dirs
-        _write_draft(drafts, "extraction_cautious", _MINIMAL_EXTRACTION)
-
-        # Synthetic legacy that says "always extract" — different from
-        # the tree's actual behaviour (which only extracts at IsFinalTick).
-        # Bless should still record the legacy values and then check the tree
-        # against them; since they differ, publish must fail.
-        def fake_legacy(kind, grid):
-            return {input_id: True for input_id, _ in grid}
-
-        result = pub.publish("extraction_cautious", bless_from_legacy=fake_legacy)
-        assert not result.success
-        assert any(d.check == "legacy_parity" for d in result.diagnostics)
-
 
 class TestPublishSecondTime:
     def test_unchanged_tree_publishes_again(self, isolated_tree_dirs):
