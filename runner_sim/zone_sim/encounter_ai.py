@@ -21,6 +21,17 @@ from __future__ import annotations
 from .extraction_ai import Doctrine, SquadLoot, Tier
 
 
+_ENCOUNTER_TREES: dict[Doctrine, "Tree"] = {}
+
+
+def _get_encounter_tree(doctrine: Doctrine):
+    if doctrine not in _ENCOUNTER_TREES:
+        from ai_tree.publisher import load_published
+        from runner_sim.zone_sim import ai_conditions  # noqa: F401 — registers leaves
+        _ENCOUNTER_TREES[doctrine] = load_published(f"encounter_{doctrine.value}")
+    return _ENCOUNTER_TREES[doctrine]
+
+
 def should_engage(
     doctrine: Doctrine,
     own_combat: float,
@@ -29,43 +40,26 @@ def should_engage(
 ) -> bool:
     """Return True if the squad chooses to engage in combat.
 
-    Each doctrine weighs combat odds and carried loot differently. The combat
-    ratio (own / opponent) is the primary input — values above 1.0 favour the
-    squad, below 1.0 favour the opponent.
+    Dispatches to the published encounter tree for the squad's doctrine. The
+    tree weighs combat odds against carried loot value with doctrine-specific
+    thresholds; see `ai_trees/published/encounter_<doctrine>.json` for the
+    authoritative logic.
 
-    A squad carrying high-tier loot (Rare or above) has a much higher disengage
-    threshold across all doctrines except GREEDY — they don't want to risk
-    losing what they already have.
+    When `Tracer.enable()` has been called (typically via the simulator's
+    `--trace-ai` flag), one line per decision is printed to stdout.
     """
-    # Avoid divide-by-zero in pathological cases (opponent has all dead runners)
-    if opponent_combat_estimate <= 0.001:
-        return True   # opponent is helpless, anyone engages
+    from ai_tree.context import Context
+    from ai_tree.trace import Tracer, format_engage
+    ctx = Context(
+        own_combat=own_combat,
+        opponent_combat_estimate=opponent_combat_estimate,
+        loot=own_loot,
+    )
+    result = _get_encounter_tree(doctrine).tick(ctx)
+    if Tracer.enabled:
+        Tracer.emit(format_engage(
+            doctrine.value, result, own_combat, opponent_combat_estimate, own_loot,
+        ))
+    return result
 
-    combat_ratio = own_combat / opponent_combat_estimate
-    best = own_loot.best_tier()
-    carrying_high_value = best is not None and best >= Tier.RARE
 
-    if doctrine == Doctrine.GREEDY:
-        # Destroyer/Assassin squads are combat-confident. They engage unless heavily outgunned,
-        # and they don't care much about protecting loot — they trust their guns.
-        return combat_ratio >= 0.5
-
-    elif doctrine == Doctrine.CAUTIOUS:
-        # Thief/Recon squads avoid fights. They only engage when clearly favored,
-        # and become even more cautious when carrying valuable loot.
-        threshold = 1.5 if carrying_high_value else 1.3
-        return combat_ratio >= threshold
-
-    elif doctrine == Doctrine.BALANCED:
-        # Vandal/Rook squads engage on roughly even or favorable odds.
-        # Carrying high-value loot raises the threshold — protect what you have.
-        threshold = 1.2 if carrying_high_value else 0.9
-        return combat_ratio >= threshold
-
-    elif doctrine == Doctrine.SUPPORT:
-        # Triage squads are weakest in combat. They engage only when heavily favored,
-        # and become very risk-averse when carrying anything at all.
-        threshold = 1.8 if own_loot.items else 1.5
-        return combat_ratio >= threshold
-
-    return False   # fallback: disengage

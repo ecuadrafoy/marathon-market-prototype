@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Behaviour Tree Editor</title>
+  <link rel="stylesheet" href="css/editor.css">
+  <!-- LiteGraph.js: visual graph editor library. Loaded from CDN. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/litegraph.js@0.7.18/css/litegraph.css">
+  <script src="https://cdn.jsdelivr.net/npm/litegraph.js@0.7.18/build/litegraph.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Behaviour Tree Editor</h1>
+    <div class="tree-selector">
+      <label for="tree-name">Tree:</label>
+      <select id="tree-name">
+        <option value="">— select —</option>
+      </select>
+      <button id="btn-load" disabled>Load</button>
+      <button id="btn-save" disabled>Save Draft</button>
+      <button id="btn-publish" disabled>Publish</button>
+      <button id="btn-refresh-palette" title="Reload the palette from /catalog">Refresh palette</button>
+    </div>
+    <div id="status" class="status"></div>
+  </header>
+
+  <main class="workspace">
+    <aside class="palette" id="palette">
+      <h2>Palette</h2>
+      <div class="palette-loading">Loading catalog…</div>
+    </aside>
+
+    <section class="canvas-wrapper">
+      <canvas id="bt-canvas" tabindex="1"></canvas>
+    </section>
+
+    <aside class="sidebar" id="sidebar">
+      <h2>Diagnostics</h2>
+      <div id="diagnostics" class="diagnostics empty">No publish run yet.</div>
+    </aside>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/bt-nodes.js"></script>
+  <script src="js/serialize.js"></script>
+  <script src="js/editor.js"></script>
+</body>
+</html>

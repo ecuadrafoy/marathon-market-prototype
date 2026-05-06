@@ -1,0 +1,88 @@
+{
+  "name": "encounter_balanced",
+  "root": {
+    "type": "selector",
+    "label": "BalancedEngageDecision",
+    "children": [
+      {
+        "type": "leaf",
+        "id": "OpponentHelpless"
+      },
+      {
+        "type": "sequence",
+        "label": "HighValueGuarded",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "CarryingHighValue"
+          },
+          {
+            "type": "leaf",
+            "id": "CombatRatioAbove",
+            "params": {
+              "threshold": 1.2
+            }
+          }
+        ]
+      },
+      {
+        "type": "sequence",
+        "label": "StandardEvenOdds",
+        "children": [
+          {
+            "type": "inverter",
+            "child": {
+              "type": "leaf",
+              "id": "CarryingHighValue"
+            }
+          },
+          {
+            "type": "leaf",
+            "id": "CombatRatioAbove",
+            "params": {
+              "threshold": 0.9
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "_layout": {
+    "1": {
+      "x": 100,
+      "y": 100
+    },
+    "2": {
+      "x": -120,
+      "y": 240
+    },
+    "3": {
+      "x": 100,
+      "y": 240
+    },
+    "4": {
+      "x": -10,
+      "y": 380
+    },
+    "5": {
+      "x": 210,
+      "y": 380
+    },
+    "6": {
+      "x": 320,
+      "y": 240
+    },
+    "7": {
+      "x": 210,
+      "y": 380
+    },
+    "8": {
+      "x": 210,
+      "y": 500
+    },
+    "9": {
+      "x": 430,
+      "y": 380
+    }
+  }
+}
