@@ -23,11 +23,14 @@ const BTApi = (() => {
   }
 
   return {
-    catalog:   () => _call("GET",  "/catalog"),
-    listTrees: () => _call("GET",  "/trees"),
-    getTree:   (name) => _call("GET",  `/trees/${encodeURIComponent(name)}`),
-    putTree:   (name, doc) => _call("PUT", `/trees/${encodeURIComponent(name)}`, doc),
-    publish:   (name, { updateSnapshot = false } = {}) => {
+    catalog:      () => _call("GET",  "/catalog"),
+    scaffolds:    () => _call("GET",  "/scaffolds"),
+    listTrees:    () => _call("GET",  "/trees"),
+    getTree:      (name) => _call("GET",  `/trees/${encodeURIComponent(name)}`),
+    putTree:      (name, doc) => _call("PUT", `/trees/${encodeURIComponent(name)}`, doc),
+    createTree:   (name) => _call("POST", `/trees/${encodeURIComponent(name)}`),
+    createLeaf:   (spec) => _call("POST", "/leaves", spec),
+    publish:      (name, { updateSnapshot = false } = {}) => {
       const qs = updateSnapshot ? "?update_snapshot=true" : "";
       return _call("POST", `/trees/${encodeURIComponent(name)}/publish${qs}`);
     },

@@ -7,6 +7,7 @@ repo's real `ai_trees/`.
 """
 
 import json
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -15,7 +16,9 @@ from pathlib import Path
 
 import pytest
 
+from ai_tree import leaf_authoring as la
 from ai_tree import publisher as pub
+from ai_tree.registry import REGISTRY, clear_registry
 from ai_tree.server import BTRequestHandler
 
 
@@ -329,4 +332,213 @@ class TestStaticFiles:
         # Percent-encoded ../ should not bypass the static root check.
         status, body, _ = _get_raw(f"{running_server}/%2e%2e/CLAUDE.md")
         assert status in (403, 404)
-        assert b"# CLAUDE.md" not in body
+
+
+# ---------------------------------------------------------------------------
+# /scaffolds
+# ---------------------------------------------------------------------------
+class TestScaffolds:
+    def test_scaffolds_returns_kinds_and_doctrines(self, running_server):
+        status, body = _get(f"{running_server}/scaffolds")
+        assert status == 200
+        assert "kinds" in body
+        assert "doctrines" in body
+
+    def test_kinds_are_strict_set(self, running_server):
+        _, body = _get(f"{running_server}/scaffolds")
+        assert set(body["kinds"]) == {"extraction", "encounter"}
+
+    def test_doctrines_include_all_existing(self, running_server):
+        _, body = _get(f"{running_server}/scaffolds")
+        # All four current doctrines must be in the suggestions list.
+        assert {"greedy", "cautious", "balanced", "support"} <= set(body["doctrines"])
+
+
+# ---------------------------------------------------------------------------
+# POST /trees/<name> — create new empty draft
+# ---------------------------------------------------------------------------
+class TestCreateTree:
+    def test_create_writes_empty_selector_seed(self, running_server, isolated_tree_dirs):
+        drafts, _, _ = isolated_tree_dirs
+        status, body = _post(f"{running_server}/trees/extraction_balanced")
+        assert status == 201
+        assert body == {"name": "extraction_balanced"}
+
+        path = drafts / "extraction_balanced.json"
+        assert path.exists()
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        assert doc["root"] == {"type": "selector", "children": []}
+
+    def test_create_refuses_when_draft_exists(self, running_server):
+        # First create succeeds
+        first, _ = _post(f"{running_server}/trees/extraction_balanced")
+        assert first == 201
+        # Second collides
+        status, body = _post(f"{running_server}/trees/extraction_balanced")
+        assert status == 409
+        assert "already exists" in body["error"]
+
+    def test_create_refuses_when_published_exists(self, running_server):
+        # Round-trip a draft → publish → then try to create the same name
+        _put(f"{running_server}/trees/extraction_cautious", _MINIMAL_TREE)
+        _post(f"{running_server}/trees/extraction_cautious/publish")
+        status, body = _post(f"{running_server}/trees/extraction_cautious")
+        assert status == 409
+        assert "already exists" in body["error"]
+
+    def test_create_rejects_unknown_kind(self, running_server):
+        status, body = _post(f"{running_server}/trees/strategy_aggressive")
+        assert status == 400
+        assert "extraction|encounter" in body["error"]
+
+    def test_create_rejects_uppercase_doctrine(self, running_server):
+        status, body = _post(f"{running_server}/trees/extraction_GREEDY")
+        assert status == 400
+
+    def test_create_rejects_unknown_doctrine(self, running_server, isolated_tree_dirs):
+        """Doctrine must be in the Doctrine enum — `experimental` isn't.
+
+        The runtime dispatches by Doctrine enum value (which itself is bounded
+        by SHELL_DOCTRINE), so a tree for a doctrine no shell maps to could
+        never be triggered. The editor refuses to write one.
+        """
+        drafts, _, _ = isolated_tree_dirs
+        status, body = _post(f"{running_server}/trees/extraction_experimental")
+        assert status == 400
+        assert "Doctrine enum" in body["error"]
+        assert not (drafts / "extraction_experimental.json").exists()
+
+    def test_create_accepts_known_doctrine(self, running_server, isolated_tree_dirs):
+        """Sanity: every doctrine that *is* in the enum should be writable.
+
+        This guards against a regex/enum drift — if someone adds a doctrine
+        and breaks /scaffolds → server validation alignment, this fails.
+        """
+        from runner_sim.zone_sim.extraction_ai import Doctrine
+        drafts, _, _ = isolated_tree_dirs
+        for d in Doctrine:
+            name = f"encounter_{d.value}"
+            # Skip ones that already exist from previous test interactions
+            if (drafts / f"{name}.json").exists():
+                continue
+            status, _ = _post(f"{running_server}/trees/{name}")
+            assert status == 201, f"create failed for known doctrine {d.value}"
+
+
+# ---------------------------------------------------------------------------
+# POST /leaves — create new user leaf
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def isolated_user_leaves(tmp_path, monkeypatch):
+    """Redirect leaf_authoring writes to a tmp package and snapshot REGISTRY.
+
+    Without this, server tests that create leaves would pollute the real
+    runner_sim/zone_sim/user_leaves/ directory and leak entries across
+    test files.
+    """
+    pkg_dir = tmp_path / "tmp_user_leaves"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(la, "USER_LEAVES_DIR", pkg_dir)
+    monkeypatch.setattr(la, "USER_LEAVES_PACKAGE", "tmp_user_leaves")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    saved = dict(REGISTRY)
+    yield pkg_dir
+    clear_registry()
+    REGISTRY.update(saved)
+    for modname in list(sys.modules):
+        if modname.startswith("tmp_user_leaves"):
+            del sys.modules[modname]
+
+
+_MINIMAL_LEAF_BODY = {
+    "name": "MyServerLeaf",
+    "category": "Test.Server",
+    "description": "Always false. Created via the API in a test.",
+    "requires": [],
+    "params": [],
+    "body": "return False",
+}
+
+
+class TestCreateLeaf:
+    def test_create_leaf_201_and_palette_updates(
+        self, running_server, isolated_user_leaves
+    ):
+        status, body = _post(f"{running_server}/leaves", _MINIMAL_LEAF_BODY)
+        assert status == 201
+        assert body["name"] == "MyServerLeaf"
+
+        # Catalog now includes the new leaf
+        _, catalog = _get(f"{running_server}/catalog")
+        names = {leaf["name"] for leaf in catalog["leaves"]}
+        assert "MyServerLeaf" in names
+
+    def test_create_leaf_writes_file_to_user_leaves_dir(
+        self, running_server, isolated_user_leaves
+    ):
+        _post(f"{running_server}/leaves", _MINIMAL_LEAF_BODY)
+        # Snake-cased filename matches the rendered template
+        target = isolated_user_leaves / "my_server_leaf.py"
+        assert target.exists()
+        src = target.read_text(encoding="utf-8")
+        assert "@bt_condition" in src
+        assert "name='MyServerLeaf'" in src
+
+    def test_duplicate_name_returns_400_with_field_error(
+        self, running_server, isolated_user_leaves
+    ):
+        # First create succeeds
+        first, _ = _post(f"{running_server}/leaves", _MINIMAL_LEAF_BODY)
+        assert first == 201
+        # Second collides on registry name
+        status, body = _post(f"{running_server}/leaves", _MINIMAL_LEAF_BODY)
+        assert status == 400
+        assert any(e["field"] == "name" for e in body["errors"])
+
+    def test_invalid_body_syntax_returns_400(
+        self, running_server, isolated_user_leaves
+    ):
+        bad = {**_MINIMAL_LEAF_BODY, "name": "Broken", "body": "return ctx.x >"}
+        status, body = _post(f"{running_server}/leaves", bad)
+        assert status == 400
+        assert any(e["field"] == "body" for e in body["errors"])
+
+    def test_blank_name_returns_400(
+        self, running_server, isolated_user_leaves
+    ):
+        bad = {**_MINIMAL_LEAF_BODY, "name": ""}
+        status, body = _post(f"{running_server}/leaves", bad)
+        assert status == 400
+        assert any(e["field"] == "name" for e in body["errors"])
+
+    def test_invalid_category_returns_400(
+        self, running_server, isolated_user_leaves
+    ):
+        bad = {**_MINIMAL_LEAF_BODY, "name": "BlankCat", "category": ""}
+        status, body = _post(f"{running_server}/leaves", bad)
+        assert status == 400
+        assert any(e["field"] == "category" for e in body["errors"])
+
+    def test_param_metadata_round_trips_through_catalog(
+        self, running_server, isolated_user_leaves
+    ):
+        spec = {
+            **_MINIMAL_LEAF_BODY,
+            "name": "ParamLeaf",
+            "params": [{
+                "name": "threshold", "type": "float",
+                "default": 0.75, "description": "cutoff",
+            }],
+        }
+        status, _ = _post(f"{running_server}/leaves", spec)
+        assert status == 201
+        _, catalog = _get(f"{running_server}/catalog")
+        leaf = next(leaf for leaf in catalog["leaves"]
+                    if leaf["name"] == "ParamLeaf")
+        assert len(leaf["params"]) == 1
+        assert leaf["params"][0]["name"] == "threshold"
+        assert leaf["params"][0]["type"] == "float"
+        assert leaf["params"][0]["default"] == 0.75

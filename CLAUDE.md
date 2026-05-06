@@ -112,8 +112,19 @@ them. The system has four components:
    - Pick a tree from the dropdown, click Load, edit visually,
      click Save Draft and then Publish. Diagnostics appear in
      the right sidebar inline. Stop the server with Ctrl+C.
-   - Click "Refresh palette" after adding/removing leaves so the
-     palette picks up changes from ai_conditions.py.
+   - "New Tree" button → modal with kind dropdown (extraction |
+     encounter) + doctrine dropdown. Both are strict — they're
+     populated from the runtime's actual vocabulary, so you can
+     only author trees the dispatcher can actually run. Creates
+     an empty Selector seed in ai_trees/drafts/<name>.json.
+   - "New Leaf" button → form for authoring a new @bt_condition.
+     Generates a Python file under runner_sim/zone_sim/user_leaves/
+     and reloads the registry without restarting the server. The
+     palette refreshes automatically; new leaves appear under the
+     category you chose.
+   - "Refresh palette" reloads /catalog manually — useful if you
+     added a leaf by hand-editing user_leaves/ rather than via the
+     New Leaf form.
 
 2. CLI alternative for batch / scripted publishing:
    uv run python scripts/publish_tree.py <name>
@@ -125,6 +136,26 @@ them. The system has four components:
 3. uv run pytest && uv run python marathon_market.py
    - tests/test_ai_tree_parity.py guards against snapshot drift in CI.
 ```
+
+### Adding a new doctrine
+
+Doctrines aren't free-text in the New Tree modal — they're a strict
+dropdown sourced from `Doctrine` enum values. That's because the
+runtime dispatches by enum value, and the enum itself is downstream
+of `SHELL_DOCTRINE`: every doctrine has to be reachable by some
+shell, otherwise no squad would ever trigger its tree.
+
+So the authoring order is enforced: **shell taxonomy → SHELL_DOCTRINE
+mapping → Doctrine enum → tree files**. Adding a doctrine means:
+
+1. Decide which existing shells map to it (or add a new shell type
+   to `runner_sim/shells.py`).
+2. Add the enum value to `Doctrine` in `extraction_ai.py`.
+3. Update `SHELL_DOCTRINE` so at least one shell points at it.
+4. Restart the editor server. The new doctrine appears in the
+   New Tree dropdown automatically; author the tree and publish.
+
+Steps 1–3 require code review; step 4 is data-only.
 
 The publish gate runs four checks: schema validity, leaf-ID resolution, smoke
 load, and a snapshot-diff over a fixed grid (160 inputs for extraction trees,

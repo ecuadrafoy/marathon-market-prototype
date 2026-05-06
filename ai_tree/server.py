@@ -10,11 +10,14 @@ from `ai_tree_editor/` as static files.
 Endpoints:
 
     GET  /catalog                   list all registered leaves with metadata
+    GET  /scaffolds                 list kinds (strict) and doctrines (suggestions)
     GET  /trees                     list draft and published tree names
     GET  /trees/<name>              read a draft tree as JSON
     PUT  /trees/<name>              write a draft tree (JSON body)
+    POST /trees/<name>              create a new empty draft (refuses if exists)
     POST /trees/<name>/publish      run the publish gate; returns diagnostics
                                     (optional `update_snapshot` query flag)
+    POST /leaves                    create a new user-authored leaf (codegen + reload)
     GET  /                          serve editor index.html
     GET  /<static>                  serve any file under ai_tree_editor/
 
@@ -41,14 +44,25 @@ from urllib.parse import parse_qs, unquote, urlparse
 # and gives no way to traverse paths via percent-encoding.
 _VALID_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 
+# When the editor *creates* a new tree we enforce a stricter shape: the
+# kind prefix must be one of the dispatchable kinds, and the doctrine
+# suffix must be in the Doctrine enum (checked separately at request
+# time). Existing files (loaded via PUT) are only checked against
+# _VALID_NAME — strict creation prevents new garbage, but we don't
+# break round-tripping of older trees that might predate this rule.
+_CREATE_TREE_NAME = re.compile(r"^(extraction|encounter)_([a-z][a-z0-9_]*)$")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EDITOR_DIR = REPO_ROOT / "ai_tree_editor"
 
-# Importing this populates REGISTRY with every leaf the catalog needs.
+# Importing these populates REGISTRY with every leaf the catalog needs.
+# `ai_conditions` provides the built-in catalog; `user_leaves` autoloads any
+# editor-authored leaves (the package may be empty on a fresh checkout).
 sys.path.insert(0, str(REPO_ROOT))
 from runner_sim.zone_sim import ai_conditions  # noqa: E402, F401
+from runner_sim.zone_sim import user_leaves  # noqa: E402, F401
 
-from ai_tree import publisher  # noqa: E402
+from ai_tree import leaf_authoring, publisher  # noqa: E402
 from ai_tree.registry import REGISTRY, NodeKind  # noqa: E402
 
 
@@ -99,6 +113,28 @@ def build_catalog() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Scaffolds — vocabulary used by the "New Tree" modal
+# ---------------------------------------------------------------------------
+def build_scaffolds() -> dict[str, list[str]]:
+    """Vocabulary for the New Tree form.
+
+    `kinds` is strict — the publisher's grid generators and the runtime
+    dispatchers know about exactly these two. Adding a new kind is a code
+    change.
+
+    `doctrines` is suggestions only — the editor renders them as a
+    <datalist>, so authors can pick a known doctrine or type a new one.
+    Authoring `extraction_experimental` is fine; the runtime ignores
+    it until `Doctrine.EXPERIMENTAL` lands in extraction_ai.py.
+    """
+    from runner_sim.zone_sim.extraction_ai import Doctrine
+    return {
+        "kinds": [k.value for k in publisher.TreeKind],
+        "doctrines": [d.value for d in Doctrine],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tree CRUD
 # ---------------------------------------------------------------------------
 def list_trees() -> dict[str, list[str]]:
@@ -125,6 +161,25 @@ def write_draft(name: str, doc: dict[str, Any]) -> None:
         json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def create_empty_tree(name: str) -> tuple[bool, str | None]:
+    """Initialise a brand-new draft as an empty Selector root.
+
+    Returns (created, error). If a draft or published version already
+    exists with this name, returns (False, "<reason>") and leaves the
+    filesystem untouched.
+    """
+    draft_path = publisher.DRAFTS_DIR / f"{name}.json"
+    if draft_path.exists():
+        return False, f"draft {name!r} already exists"
+    if name in publisher.load_manifest():
+        return False, f"published tree {name!r} already exists"
+    write_draft(name, {
+        "name": name,
+        "root": {"type": "selector", "children": []},
+    })
+    return True, None
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +246,9 @@ class BTRequestHandler(BaseHTTPRequestHandler):
         if path == "/catalog":
             self._send_json(HTTPStatus.OK, build_catalog())
             return
+        if path == "/scaffolds":
+            self._send_json(HTTPStatus.OK, build_scaffolds())
+            return
         if path == "/trees":
             self._send_json(HTTPStatus.OK, list_trees())
             return
@@ -231,9 +289,25 @@ class BTRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         url = urlparse(self.path)
         path = url.path
-        if not (path.startswith("/trees/") and path.endswith("/publish")):
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown route"})
+
+        # POST /leaves — create a new user-authored leaf
+        if path == "/leaves":
+            self._handle_create_leaf()
             return
+
+        # POST /trees/<name>/publish — existing publish flow
+        if path.startswith("/trees/") and path.endswith("/publish"):
+            self._handle_publish(url, path)
+            return
+
+        # POST /trees/<name> — create new empty draft
+        if path.startswith("/trees/"):
+            self._handle_create_tree(path)
+            return
+
+        self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown route"})
+
+    def _handle_publish(self, url, path: str) -> None:
         name = unquote(path[len("/trees/"):-len("/publish")])
         if not _VALID_NAME.match(name):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid tree name"})
@@ -245,6 +319,60 @@ class BTRequestHandler(BaseHTTPRequestHandler):
         result = publish_via_api(name, update_snapshot=update_snapshot)
         status = HTTPStatus.OK if result["success"] else HTTPStatus.UNPROCESSABLE_ENTITY
         self._send_json(status, result)
+
+    def _handle_create_tree(self, path: str) -> None:
+        name = unquote(path[len("/trees/"):])
+        if not _VALID_NAME.match(name):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid tree name"})
+            return
+        m = _CREATE_TREE_NAME.match(name)
+        if not m:
+            self._send_json(HTTPStatus.BAD_REQUEST, {
+                "error": "tree name must match (extraction|encounter)_<doctrine>",
+            })
+            return
+        # Doctrine must be one the runtime can actually dispatch — that means
+        # it has to be in the Doctrine enum, which itself is bounded by the
+        # SHELL_DOCTRINE mapping. Authoring a tree no squad can ever trigger
+        # is dead weight, and the editor shouldn't write one.
+        from runner_sim.zone_sim.extraction_ai import Doctrine
+        doctrine_suffix = m.group(2)
+        valid_doctrines = {d.value for d in Doctrine}
+        if doctrine_suffix not in valid_doctrines:
+            self._send_json(HTTPStatus.BAD_REQUEST, {
+                "error": (
+                    f"doctrine {doctrine_suffix!r} is not in the Doctrine enum. "
+                    f"Add it to runner_sim/zone_sim/extraction_ai.py:Doctrine "
+                    f"(and map shells to it in SHELL_DOCTRINE) first. "
+                    f"Known doctrines: {sorted(valid_doctrines)}."
+                ),
+            })
+            return
+        created, err = create_empty_tree(name)
+        if not created:
+            self._send_json(HTTPStatus.CONFLICT, {"error": err})
+            return
+        self._send_json(HTTPStatus.CREATED, {"name": name})
+
+    def _handle_create_leaf(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return  # _read_json_body already sent 400
+        spec, parse_errors = leaf_authoring.parse_spec(payload)
+        if spec is None:
+            self._send_json(HTTPStatus.BAD_REQUEST, {
+                "errors": [{"field": e.field, "message": e.message}
+                           for e in parse_errors],
+            })
+            return
+        result = leaf_authoring.create_leaf(spec)
+        if not result.success:
+            self._send_json(HTTPStatus.BAD_REQUEST, {
+                "errors": [{"field": e.field, "message": e.message}
+                           for e in result.errors],
+            })
+            return
+        self._send_json(HTTPStatus.CREATED, {"name": result.name})
 
     # ----- static -----
     def _serve_static(self, path: str) -> None:
