@@ -125,6 +125,89 @@ parameterised). Every change to AI behaviour either:
 - Recombines these 11 in JSON (no code), or
 - Adds new leaves to the catalog (Python).
 
+### Domains (how leaves are grouped)
+
+Each leaf has a `category` string with a `<Kind>.<System>` shape:
+`Extraction.Loot`, `Encounter.Combat`, etc. The editor uses these to
+group the palette, but the convention encodes something stronger than
+visual grouping: **a domain is a category whose leaves all read the
+same slice of Context**. That binding is what makes the grouping
+meaningful — and what makes some new leaves cheap and others expensive.
+
+The current catalog:
+
+| Domain | Reads | Leaves |
+|---|---|---|
+| `Extraction.Loot` | `ctx.loot` | `CarryingNothing`, `CarryingAnything`, `HasUncommonLoot` |
+| `Extraction.Time` | `ctx.perception` (tick / max_ticks) | `IsFinalTick`, `TimePressureAbove` |
+| `Extraction.Perception` | `ctx.perception` (run history flags) | `ZoneFeelsDry`, `HadEncounter`, `TookDamage` |
+| `Encounter.Combat` | `ctx.own_combat`, `ctx.opponent_combat_estimate` | `OpponentHelpless`, `CombatRatioAbove` |
+| `Encounter.Loot` | `ctx.loot` | `CarryingHighValue` |
+
+Two important properties fall out of this:
+
+1. **Adding a leaf to an existing domain is cheap.** A new
+   `Extraction.Loot` leaf just reads `ctx.loot`, which is already
+   populated everywhere. Authoring it via the editor's New Leaf form
+   is a self-contained operation: pick the category, write the body,
+   submit. Done.
+2. **Opening a new domain is more involved.** A `Squad.Health`
+   domain would need `ctx.squad` populated everywhere a tree might
+   tick — meaning the dispatcher, the grid generators, and the
+   tick-loop call sites all need updates *before* the first leaf in
+   that domain can be written. After that one-time cost, every
+   subsequent leaf in the domain is back to "cheap".
+
+#### Adding a new domain — worked example
+
+Suppose you want squads to react to runner attrition. There's no
+existing leaf for this, and no existing domain whose Context slice
+covers it. So:
+
+```
+1. Pick the domain name and the Context binding.
+   - Name: Squad.Health
+   - Binds to: ctx.squad (a new field carrying SquadState)
+
+2. Extend Context in the dispatchers (Python edit, code review).
+   - runner_sim/zone_sim/extraction_ai.py:should_extract
+       ctx = Context(loot=loot, perception=perception, squad=squad)
+   - runner_sim/zone_sim/encounter_ai.py:should_engage  (if relevant)
+       ctx = Context(..., squad=squad)
+
+3. Update the publisher's grid generators (Python edit).
+   - ai_tree/publisher.py:extraction_grid() — populate `squad` for
+     every grid input, with enough variants to cover the leaf's
+     branches (e.g. squad with 1/2/3 alive runners).
+   - Same for encounter_grid() if encounter trees will use it.
+
+4. Update the tick-loop call sites (Python edit).
+   - runner_sim/zone_sim/sim.py — pass the squad through to
+     should_extract / should_engage.
+
+5. Author the first leaf via the editor's "New Leaf" modal.
+   - Name: LowOnRunners
+   - Category: Squad.Health
+   - Requires: squad
+   - Body: return len([r for r in ctx.squad.runners if r.alive]) <= 2
+
+6. From now on: every Squad.Health leaf is just step 5.
+```
+
+Steps 2–4 are the *domain expansion*. Steps 5+ are *catalog growth
+within an existing domain*. The publish gate's grid evaluation is
+unforgiving in a useful way: if you forget step 3, the next snapshot
+run errors with `Context has no attribute 'squad'`, pinning the
+mistake to the missing wiring.
+
+The distinction shows up in the editor too. The New Leaf form's
+**Requires** field auto-suggests context names that already exist
+in the catalog (`loot`, `perception`, `own_combat`,
+`opponent_combat_estimate`). Typing a new name like `squad` is
+allowed but signals "this is a domain expansion, not a catalog
+growth" — and your leaf will fail to publish until the dispatcher
+populates that field.
+
 ### Composites (the engine)
 
 `ai_tree/composites.py` defines what `Sequence`, `Selector`, and
@@ -160,39 +243,42 @@ tell you immediately if you forgot.
 Q: Do I want a different combination of existing checks,
    different parameter values, or different priorities?
    ─────────────────────────────────────────────────────
-                            │
-                ┌───────────┴───────────┐
-                │                       │
-              YES                       NO
-                │                       │
-                ▼                       │
-          JSON only.                    ▼
-          Edit a tree in           Q: Do I want a new kind of
-          the editor and               check that doesn't exist
-          publish.                     in the catalog yet?
-                                     ─────────────────────────
-                                       │
+                       │
+           ┌───────────┴───────────┐
+           │                       │
+         YES                       NO
+           │                       │
+           ▼                       │
+   JSON only — edit               ▼
+   the tree in the          Q: Do I want a new check, but it only
+   editor and publish.         reads existing ctx fields (loot,
+                               perception, etc.)?
+                              ────────────────────────────────────
+                                │
+                       ┌────────┴────────┐
+                       │                 │
+                     YES                 NO
+                       │                 │
+                       ▼                 ▼
+              "New Leaf" form      Q: Do I want the AI to react to
+              in the editor →         game data ctx doesn't carry
+              writes to               yet (squad health, market
+              user_leaves/            state, etc.)?
+              and reloads             ─────────────────────────────
+              the registry.            │
                                 ┌──────┴──────┐
                                 │             │
                               YES             NO
                                 │             │
                                 ▼             ▼
-                          New @bt_condition   Q: Do I want the
-                          in ai_conditions.   AI to react to
-                          py. Then back to    new game data?
-                          JSON to use it.    ───────────────
-                                              │
-                                       ┌──────┴──────┐
-                                       │             │
-                                     YES             NO
-                                       │             │
-                                       ▼             ▼
-                                Extend Context    Engine change
-                                in the dispatcher.   (composites.py
-                                Update grid in       runtime.py).
-                                publisher.py.        Rare; review
-                                Then maybe a new     carefully.
-                                leaf to read it.
+                          Open a new      Engine change
+                          domain:         (composites.py +
+                          extend Context  runtime.py).
+                          + grid + first  Rare; review
+                          leaf in the     carefully.
+                          new category.
+                          (See "Domains"
+                          worked example.)
 ```
 
 ---
@@ -220,32 +306,72 @@ Q: Do I want a different combination of existing checks,
    - --trace-ai shows the new behaviour live
 ```
 
+### Creating a new tree (rare)
+
+The eight existing trees cover every `<kind>_<doctrine>` slot the
+runtime can dispatch (extraction × encounter × greedy/cautious/
+balanced/support). The "New Tree" button is for two situations:
+
+- **Filling a slot you've deleted** to start over from scratch. Delete
+  the JSON file by hand, click New Tree, pick the kind and doctrine,
+  the editor seeds an empty Selector and selects it.
+- **Authoring trees for a doctrine you've just added** to the
+  `Doctrine` enum. The kind/doctrine dropdowns read from the runtime
+  vocabulary, so a new enum value appears here automatically after a
+  server restart.
+
+The kind dropdown (extraction / encounter) is strict — these are
+baked into the publisher's grid generators. The doctrine dropdown is
+also strict — it sources from `Doctrine` enum values, since the
+runtime dispatches by enum value and the enum itself is bounded by
+`SHELL_DOCTRINE` (every doctrine has to be reachable by some shell or
+no squad would ever trigger its tree). The editor refuses to write a
+tree the dispatcher couldn't actually load.
+
 ### Adding a new leaf (a few times per feature)
 
+There are two paths, depending on whether you're growing an existing
+domain or opening a new one. Most cases are the first.
+
+**Path A — Growing an existing domain (cheap, designer-driven):**
+
 ```
-1. Add the function to runner_sim/zone_sim/ai_conditions.py:
+1. Open http://localhost:8765/ → click "New Leaf".
+   Fill in name, category (pick from the existing list), description,
+   Requires (suggested from the catalog), parameters, and body.
+   Live-preview shows the rendered Python.
 
-   @bt_condition(
-       name="LowOnRunners",
-       category="Squad.Health",
-       description="True if the squad has 2 or fewer surviving runners.",
-       requires=["squad"],
-   )
-   def low_on_runners(ctx) -> bool:
-       return len([r for r in ctx.squad.runners if r.alive]) <= 2
+2. Submit.
+   Server validates, writes runner_sim/zone_sim/user_leaves/<snake>.py,
+   imports it (registry updates), and the editor refreshes the palette
+   automatically. New leaf is immediately draggable into trees.
 
-2. (If the leaf needs new Context fields like `ctx.squad` above — add
-    them in extraction_ai.should_extract / encounter_ai.should_engage,
-    and to the corresponding grid generator in publisher.py. Otherwise
-    skip this step.)
-
-3. Add a unit test in tests/test_ai_conditions.py covering both branches.
-
-4. In the editor, click "Refresh palette" — the new leaf appears in
-   the "Squad.Health" category. Drag it into trees as needed.
-
-5. uv run pytest — confirms nothing else broke.
+3. uv run pytest — confirms nothing else broke.
 ```
+
+The generated `user_leaves/<snake>.py` file is just normal Python and
+is committed alongside everything else. Hand-edit it later if you need
+to tune the body.
+
+**Path B — Opening a new domain (one-time, requires code review):**
+
+See the "Adding a new domain" walkthrough above. The short version:
+extend `Context` in the dispatcher, update the grid generators, then
+use **Path A** to author the first leaf in the new domain.
+
+**Built-in vs user leaves.** Two locations exist for `@bt_condition`
+files:
+
+- `runner_sim/zone_sim/ai_conditions.py` — the hand-curated catalog
+  that ships with the game. Edit this for foundational leaves you
+  consider part of the core vocabulary.
+- `runner_sim/zone_sim/user_leaves/*.py` — auto-discovered package,
+  one file per leaf. The editor's New Leaf form writes here. Hand-
+  authoring a file here also works; the package's `__init__.py`
+  uses `pkgutil.iter_modules` to import every sibling on startup.
+
+The runtime makes no distinction — both register into the same
+REGISTRY and appear in the same palette.
 
 ### Adding a new control structure (rare)
 
