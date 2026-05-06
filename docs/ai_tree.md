@@ -6,7 +6,9 @@ engine, the publish gate, the editor, and how to extend the system with new
 leaves or tree kinds.
 
 For day-to-day workflow commands, see the "AI behaviour trees" section in
-`CLAUDE.md`. This document is the deeper design reference.
+`CLAUDE.md`. For "what can I change in JSON vs what needs a code edit?",
+see `docs/ai_tree_authoring.md`. This document is the deeper design
+reference.
 
 ---
 
