@@ -21,9 +21,9 @@ yield_value = (50 + skill * 100) * (1 + difficulty)   # yield if successful
 
 | Zone       | Difficulty | Label  |
 |------------|-----------|--------|
-| Sector 7   | 0.1       | Easy   |
-| Deep Reach | 0.3       | Medium |
-| The Shelf  | 0.5       | Hard   |
+| Perimeter   | 0.1       | Easy   |
+| Dire Marsh | 0.3       | Medium |
+| Outpost  | 0.5       | Hard   |
 
 Skill and difficulty share the same 0–1 scale and are subtracted directly.
 A runner with skill 0.5 in a difficulty 0.5 zone has 0% success chance.
@@ -40,22 +40,22 @@ for every skill level.
 
 | Zone       | Skill 0.5 | Skill 0.7 | Skill 0.8 |
 |------------|-----------|-----------|-----------|
-| Sector 7   | 44 cr     | 78 cr     | 100 cr    |
-| Deep Reach | 26 cr     | 57 cr     | 85 cr     |
-| The Shelf  | 0 cr      | 33 cr     | 59 cr     |
+| Perimeter   | 44 cr     | 78 cr     | 100 cr    |
+| Dire Marsh | 26 cr     | 57 cr     | 85 cr     |
+| Outpost  | 0 cr      | 33 cr     | 59 cr     |
 
 **Result:** Harder zones are strictly worse for every runner, every time.
-There is no reason to ever commit to The Shelf.
+There is no reason to ever commit to Outpost.
 
 ---
 
 ## Design Intent
 
-- **Low-skill runners** (≤ 0.5): grind Sector 7, small consistent gains
-- **Mid-skill runners** (~0.6–0.7): Deep Reach is optimal
-- **Elite runners** (≥ 0.75): The Shelf should be the best choice
-- A low-skill runner grinding Sector 7 can accumulate credits over many weeks,
-  but an elite runner in The Shelf should pull ahead in fewer runs
+- **Low-skill runners** (≤ 0.5): grind Perimeter, small consistent gains
+- **Mid-skill runners** (~0.6–0.7): Dire Marsh is optimal
+- **Elite runners** (≥ 0.75): Outpost should be the best choice
+- A low-skill runner grinding Perimeter can accumulate credits over many weeks,
+  but an elite runner in Outpost should pull ahead in fewer runs
 
 This requires EV to be monotonically increasing with difficulty for elite runners,
 with the crossover point into each harder zone sitting around the skill threshold
@@ -76,20 +76,20 @@ yield_value = (50 + skill * 100) * (1 + difficulty**2 * 8)
 
 | Zone       | Difficulty | Multiplier |
 |------------|-----------|------------|
-| Sector 7   | 0.1       | ×1.08      |
-| Deep Reach | 0.3       | ×1.72      |
-| The Shelf  | 0.5       | ×3.00      |
+| Perimeter   | 0.1       | ×1.08      |
+| Dire Marsh | 0.3       | ×1.72      |
+| Outpost  | 0.5       | ×3.00      |
 
 ### EV per run — proposed formula
 
 | Zone       | Skill 0.5 | Skill 0.6 | Skill 0.7 | Skill 0.8 |
 |------------|-----------|-----------|-----------|-----------|
-| Sector 7   | 43 cr     | 59 cr     | 78 cr     | 98 cr     |
-| Deep Reach | 21 cr     | 57 cr     | 83 cr     | 112 cr    |
-| The Shelf  | 0 cr      | 33 cr     | 72 cr     | **117 cr**|
+| Perimeter   | 43 cr     | 59 cr     | 78 cr     | 98 cr     |
+| Dire Marsh | 21 cr     | 57 cr     | 83 cr     | 112 cr    |
+| Outpost  | 0 cr      | 33 cr     | 72 cr     | **117 cr**|
 
-**Result:** Elite runners (≥ 0.75) are now best off in The Shelf.
-The crossover into The Shelf being optimal sits at ~skill 0.75.
+**Result:** Elite runners (≥ 0.75) are now best off in Outpost.
+The crossover into Outpost being optimal sits at ~skill 0.75.
 
 ### Status: Implemented 2026-04-23
 
@@ -119,13 +119,13 @@ carries forward directly into the item tier weights.
 
 Visualising EV = success_rate × yield across the full skill range revealed the following:
 
-- **Deep Reach overtakes Sector 7 at skill ~0.56.** Below that threshold Sector 7 is
-  the better choice; above it Deep Reach pays more per run.
-- **The Shelf overtakes Deep Reach at skill ~0.76.** Only genuinely elite runners
+- **Dire Marsh overtakes Perimeter at skill ~0.56.** Below that threshold Perimeter is
+  the better choice; above it Dire Marsh pays more per run.
+- **Outpost overtakes Dire Marsh at skill ~0.76.** Only genuinely elite runners
   benefit from committing to the Hard zone.
-- **The population hump (mean 0.5, σ 0.15) sits almost entirely in the Sector 7
-  optimal range.** Most runners in the pool are not skilled enough for The Shelf to
-  be worth attempting — which is correct design. The Shelf should feel like a reward
+- **The population hump (mean 0.5, σ 0.15) sits almost entirely in the Perimeter
+  optimal range.** Most runners in the pool are not skilled enough for Outpost to
+  be worth attempting — which is correct design. Outpost should feel like a reward
   for outlier runners, not a default choice.
 - **EV curves fan out sharply above skill 0.7.** Skill differentiation matters most
   at the elite end — the gap between a skilled runner in the right zone vs the wrong

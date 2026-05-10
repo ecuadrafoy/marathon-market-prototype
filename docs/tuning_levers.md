@@ -184,9 +184,9 @@ Zone parameters are effectively tuning levers for the risk/reward curve.
 
 | Zone | `difficulty` | `pool_size` | Effect |
 |---|---|---|---|
-| Sector 7 | 0.1 | 12 | Easy, abundant, low-value items dominate |
-| Deep Reach | 0.3 | 8 | Medium risk, medium pool |
-| The Shelf | 0.5 | 5 | Hard, scarce, high-value items dominate |
+| Perimeter | 0.1 | 12 | Easy, abundant, low-value items dominate |
+| Dire Marsh | 0.3 | 8 | Medium risk, medium pool |
+| Outpost | 0.5 | 5 | Hard, scarce, high-value items dominate |
 
 ### `difficulty`
 
@@ -244,7 +244,7 @@ The exponent coefficient in the yield formula:
 yield = (50 + skill × 100) × (1 + difficulty² × YIELD_STEEPNESS)
 ```
 
-- **Raise** → harder zones pay dramatically more; risk/reward gap widens; The Shelf becomes much more valuable
+- **Raise** → harder zones pay dramatically more; risk/reward gap widens; Outpost becomes much more valuable
 - **Lower** → zone difficulty matters less for payout; runners distribute more evenly across zones
 - See `docs/yield_design.md` for the full EV analysis that motivated the current value of 8
 

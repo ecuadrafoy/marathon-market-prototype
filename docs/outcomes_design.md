@@ -150,9 +150,9 @@ p = clamp(runner.skill - zone.difficulty, 0.0, 1.0)
 runner.success = random.random() < p
 ```
 
-Zone difficulties: Sector 7 = 0.1 (Easy), Deep Reach = 0.3 (Medium),
-The Shelf = 0.5 (Hard). A skill-0.5 runner in Sector 7 has a 40% chance;
-the same runner in The Shelf has 0%.
+Zone difficulties: Perimeter = 0.1 (Easy), Dire Marsh = 0.3 (Medium),
+Outpost = 0.5 (Hard). A skill-0.5 runner in Perimeter has a 40% chance;
+the same runner in Outpost has 0%.
 
 All runners resolve simultaneously in Pass 1 before any yields are computed
 (Pass 2). This prevents company ordering from affecting congestion counts.
@@ -215,17 +215,17 @@ reward much faster than the probability penalty does as zones get harder.
 
 | Zone       | Difficulty | Multiplier |
 |------------|-----------|------------|
-| Sector 7   | 0.1       | ×1.08      |
-| Deep Reach | 0.3       | ×1.72      |
-| The Shelf  | 0.5       | ×3.00      |
+| Perimeter  | 0.1       | ×1.08      |
+| Dire Marsh | 0.3       | ×1.72      |
+| Outpost    | 0.5       | ×3.00      |
 
 **EV crossover points** (expected value = success_rate × yield):
 
-- Deep Reach overtakes Sector 7 at skill ≈ 0.56.
-- The Shelf overtakes Deep Reach at skill ≈ 0.76.
+- Dire Marsh overtakes Perimeter at skill ≈ 0.56.
+- Outpost overtakes Dire Marsh at skill ≈ 0.76.
 
 The population mean is 0.5 (σ = 0.15), so most runners are below the
-Sector 7/Deep Reach crossover. The Shelf is genuinely an elite-runner
+Perimeter/Dire Marsh crossover. Outpost is genuinely an elite-runner
 reward.
 
 **Congestion factor:**

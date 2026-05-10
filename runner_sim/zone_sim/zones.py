@@ -5,13 +5,13 @@ Standalone from marathon_market.ZONES — kept separate so the runner_sim
 zone simulation does not depend on the market layer. Zone names match
 marathon_market for cross-reference, but the column names in items.csv
 are derived from these names by replacing spaces with underscores and
-appending '_weight' (e.g. 'Sector 7' → 'sector_7_weight').
+appending '_weight' (e.g. 'Dire Marsh' → 'dire_marsh_weight').
 
 Pool size scales inversely with difficulty — harder zones have less stuff
 in them, reinforcing the risk/reward tradeoff. Difficulty itself feeds
 the exploration roll in sim.py: harder zones make discovery harder per
-tick, so even a long-staying squad finds less in The Shelf than they
-would in Sector 7.
+tick, so even a long-staying squad finds less in Outpost than they
+would in Perimeter.
 
 Zone data lives in data/zones.csv. Adding a row there is all that's needed
 to introduce a new zone — no code changes required. The only coupling is
@@ -33,13 +33,13 @@ class Zone:
     name: str
     difficulty: float    # 0.0 - 1.0; lowers exploration success probability
     pool_size: int       # number of items spawned in this zone per week
-    monitored: bool = False   # True for the player-visible zone (Sector 7) — provides intel
+    monitored: bool = False   # True for the player-visible zone (Perimeter) — provides intel
 
     @property
     def csv_column(self) -> str:
         """The items.csv column header that holds this zone's drop weights.
 
-        'Sector 7' → 'sector_7_weight', 'The Shelf' → 'the_shelf_weight'
+        'Perimeter' → 'perimeter_weight', 'Outpost' → 'outpost_weight'
         """
         return self.name.lower().replace(" ", "_") + "_weight"
 

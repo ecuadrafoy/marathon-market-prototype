@@ -54,9 +54,9 @@ Plain CSV. One row = one item type. Columns:
 | `name` | Display name |
 | `tier` | Integer 1–4 (maps to Tier enum) |
 | `credit_value` | Flat credit conversion |
-| `sector_7_weight` | Relative drop weight in Sector 7 |
-| `deep_reach_weight` | Relative drop weight in Deep Reach |
-| `the_shelf_weight` | Relative drop weight in The Shelf |
+| `perimeter_weight` | Relative drop weight in Perimeter |
+| `dire_marsh_weight` | Relative drop weight in Dire Marsh |
+| `outpost_weight` | Relative drop weight in Outpost |
 
 A weight of `0.0` means the item never spawns in that zone. Weights are relative to each
 other within a zone — they do not need to sum to 1.
@@ -79,9 +79,9 @@ Returns `list[Item]` to the harness, which passes it unchanged into `run_zone`.
 Defines the `Zone` dataclass and the `ZONES` constant:
 
 ```
-Sector 7    difficulty=0.1  pool_size=12   (easy, abundant)
-Deep Reach  difficulty=0.3  pool_size=8    (medium)
-The Shelf   difficulty=0.5  pool_size=5    (hard, scarce but high-value)
+Perimeter   difficulty=0.1  pool_size=12   (easy, abundant)
+Dire Marsh  difficulty=0.3  pool_size=8    (medium)
+Outpost     difficulty=0.5  pool_size=5    (hard, scarce but high-value)
 ```
 
 `difficulty` feeds the exploration roll in `sim.py`: higher difficulty → lower discovery
@@ -90,7 +90,7 @@ probability per tick even for well-equipped squads.
 `pool_size` is the number of items drawn when the zone opens. Once the pool hits 0,
 no more exploration finds are possible.
 
-`csv_column` is a computed property: `"Sector 7" → "sector_7_weight"`. This is the
+`csv_column` is a computed property: `"Dire Marsh" → "dire_marsh_weight"`. This is the
 bridge between zone identity and the CSV column name.
 
 ---
@@ -287,7 +287,7 @@ No file imports from `harness.py` downward — the harness is purely a consumer.
 For each zone, a match log like:
 
 ```
-=== Sector 7 (difficulty 0.1, pool_size 12) ===
+=== Perimeter (difficulty 0.1, pool_size 12) ===
 [T0] Pool spawned: Coolant Cell x5, Scrap Chip x6, Calibrator x1.
 [T0] 3 squads enter: Foxtrot(GREEDY), Delta(SUPPORT), Echo(BALANCED)
 [T1] Delta (SUPPORT): found Scrap Chip (COMMON, 50cr). Pool: 11 left.

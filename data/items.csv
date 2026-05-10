@@ -1,4 +1,4 @@
-name,tier,credit_value,sector_7_weight,deep_reach_weight,the_shelf_weight
+name,tier,credit_value,perimeter_weight,dire_marsh_weight,outpost_weight
 Scrap Chip,1,50,0.7,0.2,0.05
 Coolant Cell,1,40,0.6,0.25,0.0
 Relay Module,2,150,0.2,0.5,0.2
