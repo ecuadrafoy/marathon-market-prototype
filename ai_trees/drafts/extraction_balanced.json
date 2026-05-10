@@ -1,0 +1,45 @@
+{
+  "name": "ExtractionBalanced",
+  "root": {
+    "type": "selector",
+    "children": [
+      {
+        "type": "leaf",
+        "id": "IsFinalTick"
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "ZoneFeelsDry"
+          },
+          {
+            "type": "leaf",
+            "id": "CarryingNothing"
+          }
+        ],
+        "label": "DryAndEmpty"
+      },
+      {
+        "type": "leaf",
+        "id": "HasUncommonLoot"
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "ZoneFeelsDry"
+          },
+          {
+            "type": "leaf",
+            "id": "HadEncounter"
+          }
+        ],
+        "label": "DryAfterEncounter"
+      }
+    ],
+    "label": "BalancedExtractDecision"
+  }
+}

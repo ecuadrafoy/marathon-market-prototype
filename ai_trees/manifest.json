@@ -1,0 +1,42 @@
+{
+  "encounter_balanced": {
+    "grid_size": 75,
+    "published_at": "2026-05-05T22:38:56+00:00",
+    "sha256": "6c7ea168a6fd9d71f1f1a38eebd3d01db18114e39a1203d17c8c2c43da24c667"
+  },
+  "encounter_cautious": {
+    "grid_size": 75,
+    "published_at": "2026-05-03T14:17:01+00:00",
+    "sha256": "3edeca9b533fe1a010d3f01836ff12e73550777d7e5f299ac5af6f27743ddc8a"
+  },
+  "encounter_greedy": {
+    "grid_size": 75,
+    "published_at": "2026-05-03T14:17:01+00:00",
+    "sha256": "dd1ab996f9868a56f8699069b01414384debef5fb3762174bdac87f72e025d95"
+  },
+  "encounter_support": {
+    "grid_size": 75,
+    "published_at": "2026-05-03T14:17:02+00:00",
+    "sha256": "0ca89f829d2a2f54e5198c8a3a223b610a85f405d7d44934ca4a8ded86876a41"
+  },
+  "extraction_balanced": {
+    "grid_size": 160,
+    "published_at": "2026-05-03T14:17:00+00:00",
+    "sha256": "a4bcf39e1cfcde974760314d8bf2531a522bb84c0b8983ccb3bdf9f486e965a0"
+  },
+  "extraction_cautious": {
+    "grid_size": 160,
+    "published_at": "2026-05-03T14:16:59+00:00",
+    "sha256": "df0526dd5e516a152006b55f99f25f380637a7a592660b48683c28998999afd2"
+  },
+  "extraction_greedy": {
+    "grid_size": 160,
+    "published_at": "2026-05-03T14:16:59+00:00",
+    "sha256": "0025a012e4c33c40e20740bc024ea56370eb7034b30621b51b70b59d3060ede0"
+  },
+  "extraction_support": {
+    "grid_size": 160,
+    "published_at": "2026-05-03T14:17:00+00:00",
+    "sha256": "3ad8411f724c7d70015c5760788935870fa48b8e5f1122d4e9b566efc716786c"
+  }
+}

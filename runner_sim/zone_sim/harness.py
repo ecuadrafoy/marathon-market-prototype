@@ -270,7 +270,15 @@ def main() -> None:
         "--pool-size", type=int, default=DEFAULT_POOL_SIZE,
         help=f"Number of runners to create (default {DEFAULT_POOL_SIZE})",
     )
+    parser.add_argument(
+        "--trace-ai", action="store_true",
+        help="Print every behaviour-tree decision (extract / engage) to stdout.",
+    )
     args = parser.parse_args()
+
+    if args.trace_ai:
+        from ai_tree.trace import Tracer
+        Tracer.enable()
 
     if args.seed is not None:
         random.seed(args.seed)

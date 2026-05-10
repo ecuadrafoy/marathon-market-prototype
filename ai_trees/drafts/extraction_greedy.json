@@ -1,0 +1,48 @@
+{
+  "name": "ExtractionGreedy",
+  "root": {
+    "type": "selector",
+    "children": [
+      {
+        "type": "leaf",
+        "id": "IsFinalTick"
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "ZoneFeelsDry"
+          },
+          {
+            "type": "leaf",
+            "id": "CarryingNothing"
+          }
+        ],
+        "label": "DryAndEmpty"
+      },
+      {
+        "type": "leaf",
+        "id": "TimePressureAbove",
+        "params": {
+          "threshold": 0.75
+        }
+      },
+      {
+        "type": "sequence",
+        "children": [
+          {
+            "type": "leaf",
+            "id": "ZoneFeelsDry"
+          },
+          {
+            "type": "leaf",
+            "id": "CarryingAnything"
+          }
+        ],
+        "label": "DryWithLoot"
+      }
+    ],
+    "label": "GreedyExtractDecision"
+  }
+}

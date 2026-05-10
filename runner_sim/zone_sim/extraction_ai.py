@@ -152,6 +152,20 @@ def squad_doctrine(shell_names: list[str]) -> Doctrine:
 # ---------------------------------------------------------------------------
 # EXTRACTION DECISION
 # ---------------------------------------------------------------------------
+# Trees are loaded lazily on first call (and cached) so import order is
+# tolerant — the registry needs `ai_conditions` imported before any tree loads,
+# and lazy loading lets the test suite control that ordering.
+_EXTRACTION_TREES: dict[Doctrine, "Tree"] = {}
+
+
+def _get_extraction_tree(doctrine: Doctrine):
+    if doctrine not in _EXTRACTION_TREES:
+        from ai_tree.publisher import load_published
+        from runner_sim.zone_sim import ai_conditions  # noqa: F401 — registers leaves
+        _EXTRACTION_TREES[doctrine] = load_published(f"extraction_{doctrine.value}")
+    return _EXTRACTION_TREES[doctrine]
+
+
 def should_extract(
     doctrine: Doctrine,
     loot: SquadLoot,
@@ -159,55 +173,19 @@ def should_extract(
 ) -> bool:
     """Return True if the squad should extract this tick.
 
-    Called once per tick per active squad, after exploration and combat.
-    A squad that returns True stops participating in further ticks —
-    their loot is locked in, they are no longer in the zone.
+    Dispatches to the published behaviour tree for the squad's doctrine.
+    Trees are authored in the visual editor, validated by the publish gate,
+    and loaded here only after their manifest checksum verifies.
 
-    The squad only acts on what it can perceive — perception contains
-    experiential signals, not raw zone statistics.
-
-    Two universal exits fire before doctrine logic:
-    - Final tick → everyone extracts (the run ends)
-    - Zone feels dry + carrying nothing → no reason to stay
-
-    Doctrine logic handles everything in between.
+    When `Tracer.enable()` has been called (typically via the simulator's
+    `--trace-ai` flag), one line per decision is printed to stdout.
     """
-    # Universal exits — apply regardless of doctrine
-    if perception.tick >= perception.max_ticks:
-        return True    # run is over, everyone leaves
-    if perception.zone_feels_dry() and not loot.items:
-        return True    # haven't found anything for a while and carrying nothing — cut losses
+    from ai_tree.context import Context
+    from ai_tree.trace import Tracer, format_extract
+    ctx = Context(loot=loot, perception=perception)
+    result = _get_extraction_tree(doctrine).tick(ctx)
+    if Tracer.enabled:
+        Tracer.emit(format_extract(doctrine.value, result, loot, perception))
+    return result
 
-    if doctrine == Doctrine.GREEDY:
-        # A greedy squad stays as long as the zone is producing.
-        # They extract only when the zone has gone dry and they have something to protect,
-        # or when time pressure forces their hand.
-        running_out_of_time = perception.time_pressure() > 0.75
-        nothing_left = perception.zone_feels_dry() and bool(loot.items)
-        return running_out_of_time or nothing_left
 
-    elif doctrine == Doctrine.CAUTIOUS:
-        # A cautious squad extracts the moment they have anything worth keeping.
-        # An encounter makes them more likely to leave, as they want to avoid risk.
-        best = loot.best_tier()
-        has_value = best is not None and best >= Tier.UNCOMMON
-        spooked = perception.had_encounter_this_run and bool(loot.items)
-        return has_value or spooked
-
-    elif doctrine == Doctrine.BALANCED:
-        # A balanced squad considers multiple factors before extracting.
-        # They may stay longer if the zone feels dry but have valuable items.
-        best = loot.best_tier()
-        has_value = best is not None and best >= Tier.UNCOMMON
-        zone_dry = perception.zone_feels_dry()
-        encountered = perception.had_encounter_this_run
-        return has_value or (zone_dry and encountered)
-
-    elif doctrine == Doctrine.SUPPORT:
-        # Triage squads stay the longest — their value is enabling the team, not personal loot.
-        # They leave only when time is nearly up, or when they took damage and have something to protect.
-        running_out_of_time = perception.time_pressure() > 0.9
-        damaged_and_carrying = perception.took_damage_this_run and bool(loot.items)
-        return running_out_of_time or damaged_and_carrying
-
-    return False   # fallback: stay in zone

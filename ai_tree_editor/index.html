@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Behaviour Tree Editor</title>
+  <link rel="stylesheet" href="css/editor.css">
+  <!-- LiteGraph.js: visual graph editor library. Loaded from CDN. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/litegraph.js@0.7.18/css/litegraph.css">
+  <script src="https://cdn.jsdelivr.net/npm/litegraph.js@0.7.18/build/litegraph.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Behaviour Tree Editor</h1>
+    <div class="tree-selector">
+      <label for="tree-name">Tree:</label>
+      <select id="tree-name">
+        <option value="">— select —</option>
+      </select>
+      <button id="btn-load" disabled>Load</button>
+      <button id="btn-save" disabled>Save Draft</button>
+      <button id="btn-publish" disabled>Publish</button>
+      <button id="btn-new-tree" title="Create a new empty tree slot">New Tree</button>
+      <button id="btn-new-leaf" title="Create a new user-authored leaf">New Leaf</button>
+      <button id="btn-refresh-palette" title="Reload the palette from /catalog">Refresh palette</button>
+    </div>
+    <div id="status" class="status"></div>
+  </header>
+
+  <main class="workspace">
+    <aside class="palette" id="palette">
+      <h2>Palette</h2>
+      <div class="palette-loading">Loading catalog…</div>
+    </aside>
+
+    <section class="canvas-wrapper">
+      <canvas id="bt-canvas" tabindex="1"></canvas>
+    </section>
+
+    <aside class="sidebar" id="sidebar">
+      <h2>Diagnostics</h2>
+      <div id="diagnostics" class="diagnostics empty">No publish run yet.</div>
+    </aside>
+  </main>
+
+  <!-- ─── New Tree modal ─────────────────────────────────────────────────── -->
+  <dialog id="new-tree-modal" class="bt-modal">
+    <form id="new-tree-form" method="dialog">
+      <h2>New Tree</h2>
+      <p class="modal-hint">Both kind and doctrine are bounded by what the runtime can dispatch. To add a new doctrine, edit <code>runner_sim/zone_sim/extraction_ai.py</code> first (Doctrine enum + SHELL_DOCTRINE mapping), then it'll appear here automatically.</p>
+
+      <div class="form-row" data-field="kind">
+        <label for="nt-kind">Kind</label>
+        <select id="nt-kind" required></select>
+        <div class="field-error" hidden></div>
+      </div>
+
+      <div class="form-row" data-field="doctrine">
+        <label for="nt-doctrine">Doctrine</label>
+        <select id="nt-doctrine" required>
+          <option value="">— select —</option>
+        </select>
+        <div class="field-error" hidden></div>
+      </div>
+
+      <div class="form-row preview-row">
+        <label>Will create</label>
+        <code id="nt-preview" class="preview-name">—</code>
+        <div id="nt-preview-msg" class="preview-msg" hidden></div>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" class="btn-secondary" data-close-modal="new-tree-modal">Cancel</button>
+        <button type="submit" id="nt-submit" class="btn-primary" disabled>Create</button>
+      </div>
+
+      <div class="form-error-fallback" data-field-fallback hidden></div>
+    </form>
+  </dialog>
+
+  <!-- ─── New Leaf modal ─────────────────────────────────────────────────── -->
+  <dialog id="new-leaf-modal" class="bt-modal bt-modal-wide">
+    <form id="new-leaf-form" method="dialog">
+      <h2>New Leaf</h2>
+      <p class="modal-hint">Generates a Python file under <code>runner_sim/zone_sim/user_leaves/</code> and reloads the registry.</p>
+
+      <div class="form-row" data-field="name">
+        <label for="nl-name">Name</label>
+        <input id="nl-name" required pattern="[A-Z][A-Za-z0-9]*"
+               placeholder="LowOnRunners" />
+        <div class="field-hint">PascalCase: starts with uppercase, letters/digits only.</div>
+        <div class="field-error" hidden></div>
+      </div>
+
+      <div class="form-row" data-field="category">
+        <label for="nl-category">Category</label>
+        <input id="nl-category" list="nl-category-list" required
+               placeholder="Squad.Health" />
+        <datalist id="nl-category-list"></datalist>
+        <div class="field-hint">Used for palette grouping. Pick an existing category or invent a new one.</div>
+        <div class="field-error" hidden></div>
+      </div>
+
+      <div class="form-row" data-field="description">
+        <label for="nl-description">Description</label>
+        <input id="nl-description" required
+               placeholder="True if 2 or fewer surviving runners." />
+        <div class="field-error" hidden></div>
+      </div>
+
+      <div class="form-row" data-field="requires">
+        <label>Requires (context fields)</label>
+        <div id="nl-requires-chips" class="chip-input">
+          <input id="nl-requires-input" list="nl-requires-list"
+                 placeholder="type a field name and Enter" />
+          <datalist id="nl-requires-list"></datalist>
+        </div>
+        <div class="field-hint">Names of <code>ctx.&lt;field&gt;</code> attributes the leaf reads. Suggestions come from existing leaves.</div>
+        <div class="field-error" hidden></div>
+      </div>
+
+      <div class="form-row" data-field="params">
+        <label>Parameters</label>
+        <table id="nl-params-table" class="params-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Default</th>
+              <th>Description</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <button type="button" id="nl-add-param" class="btn-secondary btn-small">+ Add parameter</button>
+        <div class="field-error" hidden></div>
+      </div>
+
+      <div class="form-row" data-field="body">
+        <label for="nl-body">Body</label>
+        <textarea id="nl-body" required rows="6" spellcheck="false"
+                  placeholder="return ctx.squad.size &lt; 3"></textarea>
+        <div class="field-hint">Python that returns <code>bool</code>. The function signature <code>(ctx) -> bool</code> is added by the template.</div>
+        <div class="field-error" hidden></div>
+      </div>
+
+      <details class="preview-details">
+        <summary>Preview generated file</summary>
+        <pre id="nl-preview" class="code-preview"></pre>
+      </details>
+
+      <div class="form-actions">
+        <button type="button" class="btn-secondary" data-close-modal="new-leaf-modal">Cancel</button>
+        <button type="submit" id="nl-submit" class="btn-primary">Create</button>
+      </div>
+
+      <div class="form-error-fallback" data-field-fallback hidden></div>
+    </form>
+  </dialog>
+
+  <script src="js/api.js"></script>
+  <script src="js/modals.js"></script>
+  <script src="js/bt-nodes.js"></script>
+  <script src="js/serialize.js"></script>
+  <script src="js/editor.js"></script>
+</body>
+</html>
