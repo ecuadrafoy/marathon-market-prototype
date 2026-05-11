@@ -115,6 +115,8 @@ You see Perimeter. The market sees everything. This is the core tension:
 The primary interface is a persistent Textual TUI — no scrolling walls of text, all
 information visible simultaneously.
 
+![Marathon Market TUI — Week 21, planning phase](marketScreenshot.jpg)
+
 ```
 ┌ MARATHON MARKET  ·  Week 4  ·  PLANNING ─────────────────────────────────────────────┐
 │ status bar                                                                            │
