@@ -62,9 +62,12 @@ class WeekSimulationResult:
     company_results is the player-facing summary (asymmetric — only monitored
     zone is named). zone_results is the full engine state including hidden
     zones; intended for debug display, charts, and analysis.
+    co_squads_by_company maps company_name → zone_name → Squad; used to
+    extract per-company, per-zone outcomes for debug display.
     """
     company_results: list["CompanyWeekResult"]
     zone_results: dict[str, ZoneRunResult]
+    co_squads_by_company: dict[str, dict[str, Squad]]
 
 
 # ---------------------------------------------------------------------------
@@ -302,4 +305,8 @@ def simulate_week(
     # --- 6. Update shell market based on new (post-recruitment) adoption ---
     update_prices(market, all_runners(rosters))
 
-    return WeekSimulationResult(company_results=results, zone_results=zone_results)
+    return WeekSimulationResult(
+        company_results=results,
+        zone_results=zone_results,
+        co_squads_by_company=co_squads_by_company,
+    )

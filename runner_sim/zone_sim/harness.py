@@ -58,9 +58,9 @@ SHELL_STYLE: dict[str, str] = {
 }
 
 ZONE_STYLE: dict[str, str] = {
-    "Sector 7":   "bright_green",
-    "Deep Reach": "yellow",
-    "The Shelf":  "bright_red",
+    "Perimeter":  "bright_green",
+    "Dire Marsh": "yellow",
+    "Outpost":    "bright_red",
 }
 
 

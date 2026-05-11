@@ -5,11 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Run the simulator
+# Run the simulator (Textual TUI)
 uv run python marathon_market.py
+
+# Run in console mode — plain text, no TUI; useful for debugging game logic
+uv run python marathon_market.py --console
 
 # Run with debug mode (reveals all hidden zones in results)
 uv run python marathon_market.py --debug
+uv run python marathon_market.py --console --debug
 
 # Run with AI tracing — every BT extract/engage decision is printed
 uv run python marathon_market.py --trace-ai
@@ -43,7 +47,7 @@ All simulation logic lives in `marathon_market.py`. `charts.py` imports from it 
 - **Standard** — runners distributed randomly across zones, then randomly to companies within each zone
 - **Skill-matched** — all skills generated upfront, sorted descending; each runner is weighted toward harder zones based on `zone.difficulty × runner.skill`. This creates a correlation between zone difficulty and runner quality that the player cannot directly observe (only the monitored zone is visible)
 
-**Information asymmetry is core to the design.** The player sees runner headcounts in Sector 7 (monitored) only. Stock prices move on performance across *all three zones*. The visible zone is intentionally a weak signal — price surprises come from hidden zones. `CompanyWeekResult` carries both `monitored_*` fields (player intel) and aggregate fields (actual price driver) to keep this split explicit.
+**Information asymmetry is core to the design.** The player sees runner headcounts in Perimeter (monitored) only. Stock prices move on performance across *all three zones*. The visible zone is intentionally a weak signal — price surprises come from hidden zones. `CompanyWeekResult` carries both `monitored_*` fields (player intel) and aggregate fields (actual price driver) to keep this split explicit.
 
 **Market formula pipeline** (`_compute_price_change_pct`):
 - `performance_score = success_rate × average_yield` (per company, all zones)

@@ -153,11 +153,11 @@ At the start of each week, before any zones run, every company must send all
 
 | Zone | Difficulty | Pool Size | Monitored? |
 |---|---|---|---|
-| Sector 7 | 0.1 (Easy) | 12 items | Yes — player can see this |
-| Deep Reach | 0.3 (Medium) | 8 items | Hidden |
-| The Shelf | 0.5 (Hard) | 5 items | Hidden |
+| Perimeter | 0.1 (Easy) | 12 items | Yes — player can see this |
+| Dire Marsh | 0.3 (Medium) | 8 items | Hidden |
+| Outpost | 0.5 (Hard) | 5 items | Hidden |
 
-The player only sees what happens in Sector 7. The other two zones drive
+The player only sees what happens in Perimeter. The other two zones drive
 market prices but stay invisible to the player unless `--debug` is active.
 
 ### Squad formation (v1: simple and deterministic)
@@ -167,7 +167,7 @@ market prices but stay invisible to the player unless `--debug` is active.
    squad 0, the next three form squad 1, and the last three form squad 2.
 
 2. **Shuffle the zone list randomly**, independently per company. Squad 0 might
-   go to The Shelf one week and Sector 7 the next. Different companies shuffle
+   go to Outpost one week and Perimeter the next. Different companies shuffle
    independently, so there's no correlation between who goes where.
 
 3. **Assign one squad per zone** — exactly 3 runners per zone, no bench.
@@ -175,7 +175,7 @@ market prices but stay invisible to the player unless `--debug` is active.
 ```python
 sorted_runners = sorted(roster.runners, key=lambda r: r.id)
 chunks = [sorted_runners[0:3], sorted_runners[3:6], sorted_runners[6:9]]
-shuffled_zones = shuffle([Sector 7, Deep Reach, The Shelf])
+shuffled_zones = shuffle([Perimeter, Dire Marsh, Outpost])
 zone_to_squad = {zone: chunk for zone, chunk in zip(shuffled_zones, chunks)}
 ```
 

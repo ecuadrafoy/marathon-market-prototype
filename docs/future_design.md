@@ -14,13 +14,13 @@ before implementation work makes sense.
 
 ## Big Picture: A Progression Arc
 
-The integration we shipped gives the player one game shape: *decode Sector 7
+The integration we shipped gives the player one game shape: *decode Perimeter
 signals → bet on stocks → win or lose*. The ideas below combine to evolve
 the game shape across a long session, without needing new content:
 
 | Phase | Capital | Player activity |
 |---|---|---|
-| **Early** | Low | Read Sector 7, place small bets, spectator-investor |
+| **Early** | Low | Read Perimeter, place small bets, spectator-investor |
 | **Mid** | Some | Pattern-match on adapting company AI, predictive investor |
 | **Late** | Significant ownership | Direct strategy of companies you own, active operator |
 
@@ -45,16 +45,16 @@ attributes, but companies don't *act* differently. With adaptive AI,
 each company becomes a recognizable character whose patterns the player
 can learn to predict.
 
-### Concrete example: GREEDY-in-Sector-7 as a recovery play
+### Concrete example: GREEDY-in-Perimeter as a recovery play
 
 A struggling company should prefer **GREEDY squads in low-difficulty
 zones** — not because it's exciting, but because GREEDY (stay long,
-fight aggressively) in Sector 7 (low-stakes encounters) is a *reliable
+fight aggressively) in Perimeter (low-stakes encounters) is a *reliable
 floor* play. Low ceiling, but bounded variance. A struggling company
 needs predictable income to stop the price slide, not Memory Crystal
 jackpots that won't materialize.
 
-A thriving company can afford the inverse — GREEDY-in-The-Shelf, where
+A thriving company can afford the inverse — GREEDY-in-Outpost, where
 the variance might pay off in big finds.
 
 ### Key design questions
@@ -80,7 +80,7 @@ the variance might pay off in big finds.
    - Roster suddenly losing all Destroyers (forced doctrine shift)
    - Competitor-relative events ("Sekiguchi just beat our market cap")
 5. **Granularity.** Does each company adapt one global strategy, or
-   adapt per-zone? *"We've been bad at The Shelf lately → send safer
+   adapt per-zone? *"We've been bad at Outpost lately → send safer
    squads there specifically"* vs. *"We're bad overall → safer everywhere"*.
 
 ### Strategy translates to deployment via four sub-decisions
@@ -127,7 +127,7 @@ shell market.
 ### Emergent properties to watch for
 
 - **Strategy coupling through the shell market.** If three struggling
-  companies all want GREEDY-Sector-7, they all need Destroyers, driving
+  companies all want GREEDY-Perimeter, they all need Destroyers, driving
   Destroyer prices up and choking off the strategy. Self-balancing
   equilibrium emerges.
 - **Death-doctrine feedback.** Aggressive strategies → more deaths →
@@ -155,8 +155,8 @@ creating richer portfolio decisions.
 
 ### Information access as the killer reward
 
-Currently the player only sees Sector 7 outcomes — Deep Reach and The
-Shelf are hidden. **Board membership is the natural way to lift this
+Currently the player only sees Perimeter outcomes — Dire Marsh and
+Outpost are hidden. **Board membership is the natural way to lift this
 veil for owned companies.**
 
 The architecture already supports it: `WeekSimulationResult` cleanly
@@ -237,8 +237,8 @@ Currently a runner's shell, `credit_balance`, career stats — everything —
 is destroyed with them on squad elimination. Alternatives worth considering:
 
 - **Partial shell-price refund** on death. Incentivizes survival without
-  rendering deaths costless. Refund rate could vary by zone (Sector 7
-  death = 80% recovered, The Shelf = 20%).
+  rendering deaths costless. Refund rate could vary by zone (Perimeter
+  death = 80% recovered, Outpost = 20%).
 - **Salvage by killing squad.** The squad that won the combat recovers
   a fraction of the dead runner's shell value. Mirrors the existing
   Uncommon+ kill-loot transfer mechanic.
@@ -371,8 +371,8 @@ Currently stubbed. New visualizations to add:
 ### Per-zone baseline scaling
 
 Currently all zones contribute equally to a company's total credits,
-which feeds the price formula. If Sector 7 dominates total credits 90/10
-over The Shelf in long runs, baseline should scale per zone separately.
+which feeds the price formula. If Perimeter dominates total credits 90/10
+over Outpost in long runs, baseline should scale per zone separately.
 Not currently observed but worth re-checking after long calibration runs.
 
 ### Long-run divergence softening

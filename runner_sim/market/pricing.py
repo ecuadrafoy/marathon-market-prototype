@@ -43,7 +43,7 @@ class CompanyWeekResult:
     price_change_pct: float = 0.0
     price_before: float = 0.0
     price_after: float = 0.0
-    # monitored zone intel (Sector 7 only)
+    # monitored zone intel (Perimeter only)
     monitored_squad_returned: bool = False
     monitored_credits: float = 0.0
     monitored_eliminations: int = 0

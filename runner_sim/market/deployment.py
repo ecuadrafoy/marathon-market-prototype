@@ -9,7 +9,7 @@ whatever shell they were hired into.
 Strategy (intentionally simple for v1):
   1. Sort 9 runners by id (deterministic).
   2. Chunk into three squads of 3 (squads[0..2]).
-  3. Random-shuffle [Sector 7, Deep Reach, The Shelf] and assign one squad per zone.
+  3. Random-shuffle [Perimeter, Dire Marsh, Outpost] and assign one squad per zone.
 
 Player-controlled deployment is a future hook — assign_squads is the
 single override point.
@@ -32,7 +32,7 @@ from runner_sim.zone_sim.sim import Squad, make_squad
 # squad name disambiguates which company it belongs to in shared logs.
 def _squad_name(company_name: str, zone_name: str) -> str:
     """e.g. 'CyberAcme/S7' — short, unique per (company, zone) pair."""
-    abbrev = "".join(w[0] for w in zone_name.split())  # 'Sector 7' -> 'S7'
+    abbrev = "".join(w[0] for w in zone_name.split())  # 'Dire Marsh' -> 'DM'
     return f"{company_name}/{abbrev}"
 
 

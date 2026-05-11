@@ -49,9 +49,9 @@ Every week each company deploys all 9 runners as **three squads of 3**, one per 
 
 | Zone | Difficulty | Loot pool | Visible to player? |
 |------|------------|-----------|-------------------|
-| Sector 7 | Easy (0.1) | 12 items | Yes — your monitored zone |
-| Deep Reach | Medium (0.3) | 8 items | Hidden |
-| The Shelf | Hard (0.5) | 5 items | Hidden |
+| Perimeter | Easy (0.1) | 12 items | Yes — your monitored zone |
+| Dire Marsh | Medium (0.3) | 8 items | Hidden |
+| Outpost | Hard (0.5) | 5 items | Hidden |
 
 Inside a zone, squads compete for a **shared, finite loot pool** across up to 8 ticks.
 Each tick they may find items, encounter other squads, fight, or choose to extract.
@@ -66,7 +66,7 @@ weeks.
 
 At the end of each week, a company's stock price moves based on how much credit its
 runners extracted across **all three zones** compared to a calibrated baseline expectation.
-A good week across the hidden zones can push a price up even if Sector 7 looked quiet —
+A good week across the hidden zones can push a price up even if Perimeter looked quiet —
 and vice versa.
 
 ```
@@ -93,12 +93,12 @@ to cheaper middle shells. Equilibrium settles around 58% premium / 42% middle ad
 
 ### Information asymmetry
 
-You see Sector 7. The market sees everything. This is the core tension:
+You see Perimeter. The market sees everything. This is the core tension:
 
-- A company's squad could look fine in Sector 7 while both hidden squads were wiped,
+- A company's squad could look fine in Perimeter while both hidden squads were wiped,
   sending its price down 15%.
-- A company's Sector 7 squad could be eliminated while its hidden squads cleaned out
-  The Shelf, sending its price up despite the visible bad news.
+- A company's Perimeter squad could be eliminated while its hidden squads cleaned out
+  Outpost, sending its price up despite the visible bad news.
 - The `[K]` shell market view is the one non-deceptive signal — it tells you which
   companies are fielding aggressive (GREEDY) vs. conservative (CAUTIOUS) doctrines
   based on shell adoption, before you know the results.
@@ -127,7 +127,7 @@ ROSTERS                                   ← roster health at a glance
   Traxus       9 runners  avg 2.3 extractions, 3 career deaths
   NuCaloric    9 runners  avg 3.0 extractions, 0 career deaths    ← clean run so far
 
-ZONE INTEL — Sector 7  (Easy)            ← preview only; actual squad assigned at run time
+ZONE INTEL — Perimeter  (Easy)           ← preview only; actual squad assigned at run time
   (squad lineup randomized at deploy; preview shows roster sample)
   CyberAcme    [Yara/Thi, Kestrel/Tri, Zephyr/Thi]
   Sekiguchi    [Tessa/Thi, Pike/Thi, Reno/Thi]
@@ -149,7 +149,7 @@ company with high deaths is fielding aggressive squads or getting unlucky in har
 expect more rookie-heavy rosters and shell churn.
 
 **ZONE INTEL** — The three runners shown per company are a stable roster preview, not a
-confirmed deployment. The actual squad sent to Sector 7 is only locked in when the week
+confirmed deployment. The actual squad sent to Perimeter is only locked in when the week
 simulates. Runner names show as `Name/Shl` (first 3 letters of their shell).
 
 ### Results screen
@@ -161,26 +161,26 @@ Shown after each week simulates.
   RESULTS
 ────────────────────────────────────────────────────
 
-YOUR ZONE — Sector 7  (Easy)
+YOUR ZONE — Perimeter  (Easy)
   CyberAcme    Squad RETURNED   [Kite/Des, Cinder/Thi, Echo/Thi]  ← you can see this
                    140 cr  ·  0 kills
-  Sekiguchi    Squad LOST       [Drift/Roo, Thorne/Ass, Soren/Rec] ← Sekiguchi lost Sector 7...
+  Sekiguchi    Squad LOST       [Drift/Roo, Thorne/Ass, Soren/Rec] ← Sekiguchi lost Perimeter...
                  — no extraction —
   Traxus       Squad RETURNED   [Shrike/Des, Wynn/Des, Cipher/Tri]
                    150 cr  ·  6 kills
   NuCaloric    Squad RETURNED   [Quinn/Tri, Juno/Tri, Mire/Des]
                     50 cr  ·  3 kills
 
-MARKET RESPONSE  (all zones)             ← driven by ALL zones, not just Sector 7
+MARKET RESPONSE  (all zones)             ← driven by ALL zones, not just Perimeter
   CyberAcme      379.8 →   461.0 cr  ( +21.4%)  [beat expectations]
   Sekiguchi      316.6 →   310.5 cr  (  -1.9%)  [missed expectations]  ← ...but only -1.9%?
   Traxus         316.3 →   284.9 cr  (  -9.9%)  [missed expectations]  ← Traxus looked fine here
   NuCaloric      264.5 →   272.9 cr  (  +3.2%)  [beat expectations]
 ```
 
-Notice the asymmetry: Sekiguchi lost their Sector 7 squad but barely dropped (-1.9%) —
-their hidden zone squads must have done well. Traxus returned from Sector 7 with 6 kills
-but still fell -9.9% — both hidden squads likely struggled or were wiped. **Sector 7 is a
+Notice the asymmetry: Sekiguchi lost their Perimeter squad but barely dropped (-1.9%) —
+their hidden zone squads must have done well. Traxus returned from Perimeter with 6 kills
+but still fell -9.9% — both hidden squads likely struggled or were wiped. **Perimeter is a
 weak signal.** The market has information you don't.
 
 ### Shell market — `[K]`
@@ -222,20 +222,20 @@ High adoption + rising price = companies still value this shell despite the cost
 ```
 ALL ZONES BREAKDOWN  [debug]
 
-▸ Sector 7  (Easy) ★ monitored  pool 12 → 0
-  CyberAcme/S7     CAUTIOUS  extracted     2 items,    90cr, 0 kills
-  Sekiguchi/S7     SUPPORT   extracted     1 items,   180cr, 0 kills
-  Traxus/S7        GREEDY    extracted     5 items,   220cr, 0 kills
+▸ Perimeter  (Easy) ★ monitored  pool 12 → 0
+  CyberAcme/P      CAUTIOUS  extracted     2 items,    90cr, 0 kills
+  Sekiguchi/P      SUPPORT   extracted     1 items,   180cr, 0 kills
+  Traxus/P         GREEDY    extracted     5 items,   220cr, 0 kills
 
-▸ Deep Reach  (Medium) · hidden  pool 8 → 3
-  CyberAcme/DR     GREEDY    ELIMINATED   — squad wiped —
-  Sekiguchi/DR     CAUTIOUS  extracted     2 items,   310cr, 0 kills
-  Traxus/DR        BALANCED  extracted     1 items,    70cr, 2 kills
+▸ Dire Marsh  (Medium) · hidden  pool 8 → 3
+  CyberAcme/DM     GREEDY    ELIMINATED   — squad wiped —
+  Sekiguchi/DM     CAUTIOUS  extracted     2 items,   310cr, 0 kills
+  Traxus/DM        BALANCED  extracted     1 items,    70cr, 2 kills
 
-▸ The Shelf  (Hard) · hidden  pool 5 → 5
-  CyberAcme/Sh     SUPPORT   extracted     0 items,     0cr, 0 kills
-  Sekiguchi/Sh     GREEDY    ELIMINATED   — squad wiped —
-  Traxus/Sh        CAUTIOUS  extracted     0 items,     0cr, 0 kills
+▸ Outpost  (Hard) · hidden  pool 5 → 5
+  CyberAcme/O      SUPPORT   extracted     0 items,     0cr, 0 kills
+  Sekiguchi/O      GREEDY    ELIMINATED   — squad wiped —
+  Traxus/O         CAUTIOUS  extracted     0 items,     0cr, 0 kills
 ```
 
 **SHELL COMPOSITION** — each company's current shell breakdown:

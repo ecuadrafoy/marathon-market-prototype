@@ -1,0 +1,112 @@
+Screen {
+    layout: vertical;
+    background: $background;
+}
+
+#status-bar {
+    height: 1;
+    background: $primary-darken-2;
+    color: $text;
+    padding: 0 2;
+    text-style: bold;
+}
+
+#companies-row {
+    layout: horizontal;
+    height: 1fr;
+    min-height: 10;
+}
+
+CompanyPanel {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#cyberacme {
+    border: solid green;
+}
+
+#sekiguchi {
+    border: solid cyan;
+}
+
+#traxus {
+    border: solid #FF8C00;
+}
+
+#nucaloric {
+    border: solid red;
+}
+
+#bottom-row {
+    layout: horizontal;
+    height: 12;
+}
+
+#portfolio-panel {
+    width: 2fr;
+    border: solid $primary-darken-1;
+    padding: 0 1;
+}
+
+#zone-intel-panel {
+    width: 2fr;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+#shell-ticker-panel {
+    width: 2fr;
+    border: solid $primary-darken-1;
+    padding: 0 1;
+}
+
+Footer {
+    background: $primary-darken-2;
+}
+
+/* Modal shared styles */
+.modal-container {
+    width: 60;
+    height: auto;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+.modal-title {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+.modal-error {
+    color: $error;
+    height: 1;
+}
+
+.modal-buttons {
+    height: 3;
+    margin-top: 1;
+    layout: horizontal;
+    align: center middle;
+}
+
+.modal-buttons Button {
+    margin: 0 1;
+}
+
+/* Shell market screen */
+#shell-market-screen {
+    align: center middle;
+}
+
+#shell-market-container {
+    width: 80%;
+    height: 80%;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+    overflow-y: auto;
+}
