@@ -41,7 +41,7 @@ from runner_sim.market.roster import (
     collect_used_names,
     replace_dead_runners,
 )
-from runner_sim.market.shell_market import ShellMarket, update_prices
+from runner_sim.market.shell_market import ShellMarket, update_prices, reequip_survivors
 from runner_sim.zone_sim.items import Item
 from runner_sim.zone_sim.sim import (
     CombatEvent,
@@ -163,17 +163,30 @@ def _update_runners_for_squad(
 # ---------------------------------------------------------------------------
 # COMPANY-LEVEL AGGREGATION
 # ---------------------------------------------------------------------------
+def _kills_from_events(
+    events: list[CombatEvent],
+    winner_squad_names: set[str],
+) -> int:
+    """Sum loser_runner_count for every event won by one of the named squads."""
+    return sum(ev.loser_runner_count for ev in events if ev.winner_squad in winner_squad_names)
+
+
 def _build_company_result(
     company_name: str,
     price_before: float,
     co_squads: dict[str, Squad],
     monitored_zone_name: str,
+    zone_results: dict[str, ZoneRunResult],
 ) -> CompanyWeekResult:
     """Aggregate one company's per-zone squad outcomes into a CompanyWeekResult.
 
     Critical guard: only credit-counted from extracted squads. Eliminated
     squads' loot is forfeit (they died with it; survivors plundered Uncommon+
     via kill-loot, which is already merged into the winner's squad.loot).
+
+    Kill counts come from CombatEvent.loser_runner_count — the authoritative
+    per-week source — rather than runner.eliminations, which is a lifetime
+    career total and would show cumulative kills across all past weeks.
     """
     squads_returned = sum(1 for sq in co_squads.values() if sq.extracted)
     squads_eliminated = sum(1 for sq in co_squads.values() if sq.eliminated)
@@ -181,13 +194,13 @@ def _build_company_result(
     total_credits = sum(
         float(sq.loot.total_credits()) for sq in co_squads.values() if sq.extracted
     )
+
+    # Weekly kills: count runners eliminated by this company's squads across all zones.
+    company_squad_names = {sq.name for sq in co_squads.values()}
     total_eliminations = sum(
-        sum(r.eliminations for r in sq.runners) for sq in co_squads.values()
+        _kills_from_events(zone_results[z].combat_events, company_squad_names)
+        for z in zone_results
     )
-    # Note: r.eliminations was incremented inside apply_zone_outcome; it
-    # accumulates lifetime career kills. For the *weekly* total we'd want a
-    # delta, but tracking lifetime here is fine for display since we only
-    # use total_eliminations for player-facing flavor (not the price signal).
 
     monitored_squad = co_squads.get(monitored_zone_name)
     monitored_credits = (
@@ -200,6 +213,15 @@ def _build_company_result(
         if monitored_squad is not None
         else []
     )
+
+    # Weekly kills for the monitored squad specifically.
+    if monitored_squad is not None and monitored_zone_name in zone_results:
+        monitored_kills = _kills_from_events(
+            zone_results[monitored_zone_name].combat_events,
+            {monitored_squad.name},
+        )
+    else:
+        monitored_kills = 0
 
     baseline = compute_baseline(squads_deployed=len(co_squads))
     delta = total_credits - baseline
@@ -222,11 +244,7 @@ def _build_company_result(
             monitored_squad is not None and monitored_squad.extracted
         ),
         monitored_credits=monitored_credits,
-        monitored_eliminations=(
-            sum(r.eliminations for r in monitored_squad.runners)
-            if monitored_squad is not None
-            else 0
-        ),
+        monitored_eliminations=monitored_kills,
         monitored_runner_names=monitored_runner_names,
     )
 
@@ -293,6 +311,7 @@ def simulate_week(
             price_before=price_before,
             co_squads=co_squads_by_company[company_name],
             monitored_zone_name=monitored,
+            zone_results=zone_results,
         ))
 
     # --- 5. Replace dead runners ---
@@ -301,6 +320,9 @@ def simulate_week(
         replace_dead_runners(roster, market, used_names)
         # Refresh used_names — a death-replacement pass may have added new names.
         used_names = collect_used_names(rosters)
+
+    # --- 5.5. Weekly re-equip: surviving runners upgrade to best affordable shell ---
+    reequip_survivors(all_runners(rosters), market)
 
     # --- 6. Update shell market based on new (post-recruitment) adoption ---
     update_prices(market, all_runners(rosters))

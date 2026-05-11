@@ -16,6 +16,7 @@ from runner_sim.market.shell_market import (
     ShellMarket,
     choose_affordable_shell,
     make_initial_market,
+    reequip_survivors,
     update_prices,
 )
 from runner_sim.runners import Runner
@@ -26,12 +27,13 @@ from runner_sim.shells import SHELL_ROSTER, SHELL_BY_NAME
 # Helpers
 # ---------------------------------------------------------------------------
 def _make_runner(shell_name: str, combat: float = 0.5, extraction: float = 0.3,
-                 support: float = 0.2) -> Runner:
+                 support: float = 0.2, credit_balance: float = 0.0) -> Runner:
     """Minimal runner fixture — only fields used by shell_market functions."""
     return Runner(
         id=0, name="Test", company_name="Co",
         combat=combat, extraction=extraction, support=support,
         current_shell=shell_name,
+        credit_balance=credit_balance,
     )
 
 
@@ -131,3 +133,105 @@ class TestChooseAffordableShell:
         budget = 250.0
         shell = choose_affordable_shell(runner, market.prices, budget=budget)
         assert market.prices[shell.name] <= budget
+
+
+# ---------------------------------------------------------------------------
+# reequip_survivors
+# ---------------------------------------------------------------------------
+class TestReequipSurvivors:
+    def test_no_reequip_when_already_optimal(self):
+        """Runner already wearing their best affordable shell: no switch."""
+        market = make_initial_market()
+        # Combat-heavy runner whose best affordable shell choose_affordable_shell
+        # would pick at base prices — make Destroyer the only cheap shell.
+        for shell in SHELL_ROSTER:
+            market.prices[shell.name] = 999.0
+        market.prices["Vandal"] = 50.0
+        runner = _make_runner("Vandal", combat=0.5, extraction=0.3, support=0.2,
+                              credit_balance=100.0)
+        switched = reequip_survivors([runner], market)
+        assert switched == 0
+        assert runner.current_shell == "Vandal"
+
+    def test_upgrades_when_better_shell_affordable(self):
+        """Runner with sufficient credit_balance upgrades to a better shell."""
+        market = make_initial_market()
+        # Force all shells to BASE_SHELL_PRICE so a combat-heavy runner can afford anything.
+        # At uniform prices, a high-combat runner should pick Destroyer over Vandal.
+        runner = _make_runner("Vandal", combat=0.9, extraction=0.05, support=0.05,
+                              credit_balance=600.0)
+        switched = reequip_survivors([runner], market)
+        assert switched == 1
+        assert runner.current_shell != "Vandal"
+        assert runner.credit_balance < 600.0   # credits were deducted
+
+    def test_no_upgrade_when_cannot_afford(self):
+        """Runner with 10 cr cannot afford any shell — no switch."""
+        market = make_initial_market()
+        runner = _make_runner("Vandal", combat=0.9, extraction=0.05, support=0.05,
+                              credit_balance=10.0)
+        switched = reequip_survivors([runner], market)
+        assert switched == 0
+        assert runner.current_shell == "Vandal"
+
+    def test_credits_deducted_exactly(self):
+        """Credit deduction equals the new shell's market price."""
+        market = make_initial_market()
+        runner = _make_runner("Vandal", combat=0.9, extraction=0.05, support=0.05,
+                              credit_balance=600.0)
+        before = runner.credit_balance
+        reequip_survivors([runner], market)
+        if runner.current_shell != "Vandal":
+            assert runner.credit_balance == pytest.approx(
+                before - market.prices[runner.current_shell], rel=1e-9
+            )
+
+    def test_no_downgrade_to_cheaper_worse_shell(self):
+        """Runner on a capable shell with zero balance: cheaper shells ignored."""
+        market = make_initial_market()
+        # Make Vandal very cheap, Destroyer affordable-but-already-owned.
+        market.prices["Vandal"] = 1.0
+        market.prices["Destroyer"] = 0.0   # "owned" — runner has no real budget
+        runner = _make_runner("Destroyer", combat=0.9, extraction=0.05, support=0.05,
+                              credit_balance=0.0)
+        switched = reequip_survivors([runner], market)
+        assert switched == 0
+        assert runner.current_shell == "Destroyer"
+
+    def test_return_count_matches_changes(self):
+        """Return value equals the number of runners who actually switched."""
+        market = make_initial_market()
+        # runner_a: combat-heavy, wearing Vandal, rich enough to upgrade.
+        # runner_b: same stats but broke — cannot afford any shell.
+        runner_a = _make_runner("Vandal", combat=0.9, extraction=0.05, support=0.05,
+                                credit_balance=600.0)
+        runner_b = _make_runner("Vandal", combat=0.9, extraction=0.05, support=0.05,
+                                credit_balance=10.0)
+        initial_a, initial_b = runner_a.current_shell, runner_b.current_shell
+        switched = reequip_survivors([runner_a, runner_b], market)
+        # Count how many actually changed
+        actual_changes = sum([
+            runner_a.current_shell != initial_a,
+            runner_b.current_shell != initial_b,
+        ])
+        assert switched == actual_changes
+        assert runner_b.current_shell == "Vandal"   # broke runner never moves
+
+    def test_idempotent(self):
+        """Calling reequip_survivors twice: second call returns 0."""
+        market = make_initial_market()
+        runner = _make_runner("Vandal", combat=0.9, extraction=0.05, support=0.05,
+                              credit_balance=600.0)
+        reequip_survivors([runner], market)   # first pass
+        switched_again = reequip_survivors([runner], market)   # second pass
+        assert switched_again == 0
+
+    def test_skips_dead_runners(self):
+        """Runners flagged _died_this_week are not re-equipped."""
+        market = make_initial_market()
+        runner = _make_runner("Vandal", combat=0.9, extraction=0.05, support=0.05,
+                              credit_balance=600.0)
+        runner._died_this_week = True
+        switched = reequip_survivors([runner], market)
+        assert switched == 0
+        assert runner.current_shell == "Vandal"

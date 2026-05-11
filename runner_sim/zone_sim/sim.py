@@ -206,45 +206,75 @@ def _phase_explore(
     return False
 
 
+def _encounter_pair(
+    a: Squad,
+    b: Squad,
+    log: list[str],
+    tick: int,
+    combat_pairs: list[tuple[Squad, Squad]],
+) -> None:
+    """Resolve one squad pair: roll encounter, decide engagement, queue combat."""
+    if random.random() >= ENCOUNTER_BASE_PROB:
+        return   # paths didn't cross this tick
+
+    a.had_encounter_this_run = True
+    b.had_encounter_this_run = True
+
+    a_combat = _squad_eff_combat(a)
+    b_combat = _squad_eff_combat(b)
+    a_estimate_of_b = max(0.01, b_combat + random.gauss(0.0, OPPONENT_ESTIMATE_NOISE))
+    b_estimate_of_a = max(0.01, a_combat + random.gauss(0.0, OPPONENT_ESTIMATE_NOISE))
+
+    a_engages = should_engage(a.doctrine, a_combat, a_estimate_of_b, a.loot)
+    b_engages = should_engage(b.doctrine, b_combat, b_estimate_of_a, b.loot)
+
+    if a_engages or b_engages:
+        if a_engages and b_engages:
+            log.append(f"[T{tick}] {a.name} and {b.name} cross paths — both engage.")
+        else:
+            aggressor = a.name if a_engages else b.name
+            log.append(
+                f"[T{tick}] {a.name} and {b.name} cross paths — "
+                f"{aggressor} forces engagement."
+            )
+        combat_pairs.append((a, b))
+    else:
+        log.append(
+            f"[T{tick}] {a.name} and {b.name} cross paths — both disengage."
+        )
+
+
 def _phase_encounters(
     squads: list[Squad],
     log: list[str],
     tick: int,
 ) -> list[tuple[Squad, Squad]]:
-    """Pair active squads at random, decide engage/disengage. Returns combat pairs."""
+    """Pair active squads at random, decide engage/disengage. Returns combat pairs.
+
+    Pairing: shuffle active squads, walk in steps of 2 (each squad in at most one
+    pair). If the count is odd the final squad is orphaned by the step-2 loop and
+    gets a separate encounter check against the first squad in the shuffled list,
+    giving every squad a fair chance each tick.
+
+    Engagement: combat fires if EITHER squad chooses to engage. An aggressive squad
+    (Greedy/Balanced) can force a fight; a purely defensive squad (Support/Cautious)
+    can only avoid combat when its opponent is equally unwilling.
+    """
     active = [s for s in squads if s.active]
     if len(active) < 2:
         return []
 
-    # Encounter probability scales with squad density — more squads, more crossings.
-    # Simple model: shuffle the active list, walk in pairs, each pair rolls.
     random.shuffle(active)
     combat_pairs: list[tuple[Squad, Squad]] = []
+
     for i in range(0, len(active) - 1, 2):
-        a, b = active[i], active[i + 1]
-        if random.random() >= ENCOUNTER_BASE_PROB:
-            continue   # paths didn't cross this tick
+        _encounter_pair(active[i], active[i + 1], log, tick, combat_pairs)
 
-        a.had_encounter_this_run = True
-        b.had_encounter_this_run = True
+    # Odd squad out: the last element is never reached by the step-2 loop.
+    # Pair it with the first squad so every active squad has an encounter opportunity.
+    if len(active) % 2 == 1:
+        _encounter_pair(active[-1], active[0], log, tick, combat_pairs)
 
-        a_combat = _squad_eff_combat(a)
-        b_combat = _squad_eff_combat(b)
-        # Each squad gets a noisy estimate of the other's strength
-        a_estimate_of_b = max(0.01, b_combat + random.gauss(0.0, OPPONENT_ESTIMATE_NOISE))
-        b_estimate_of_a = max(0.01, a_combat + random.gauss(0.0, OPPONENT_ESTIMATE_NOISE))
-
-        a_engages = should_engage(a.doctrine, a_combat, a_estimate_of_b, a.loot)
-        b_engages = should_engage(b.doctrine, b_combat, b_estimate_of_a, b.loot)
-
-        if a_engages and b_engages:
-            log.append(f"[T{tick}] {a.name} and {b.name} cross paths — both engage.")
-            combat_pairs.append((a, b))
-        else:
-            decliner = a.name if not a_engages else b.name
-            log.append(
-                f"[T{tick}] {a.name} and {b.name} cross paths — {decliner} disengages."
-            )
     return combat_pairs
 
 

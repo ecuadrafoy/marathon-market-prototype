@@ -122,9 +122,14 @@ def _print_results(s: GameState, value_before: float) -> None:
                 print(f"               {detail}")
 
     if s.debug:
+        market = s.market
+        prev = (market.price_history[-2] if len(market.price_history) >= 2
+                else {sh.name: BASE_SHELL_PRICE for sh in SHELL_ROSTER})
         print(f"\nSHELL MARKET")
-        for shell, price in sorted(s.market.prices.items(), key=lambda kv: -kv[1]):
-            print(f"  {shell:<10} {price:>6.1f} cr")
+        for shell, price in sorted(market.prices.items(), key=lambda kv: -kv[1]):
+            delta     = price - prev.get(shell, BASE_SHELL_PRICE)
+            delta_str = f"{delta:+.1f}" if abs(delta) >= 0.05 else "  —  "
+            print(f"  {shell:<10} {price:>6.1f} cr  ({delta_str})")
 
         print(f"\nSHELL COMPOSITION")
         for company in s.companies:

@@ -20,9 +20,9 @@ import collections
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from runner_sim.runners import Runner, _affinity_score, _runner_attrs, _shell_affinity_vec
+from runner_sim.runners import Runner, _affinity_score, _runner_attrs, _shell_affinity_vec, switch_shell
 from runner_sim.runners import RUNNER_WEIGHT, SHELL_WEIGHT
-from runner_sim.shells import Shell, SHELL_ROSTER
+from runner_sim.shells import Shell, SHELL_ROSTER, SHELL_BY_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -122,3 +122,40 @@ def choose_affordable_shell(runner: Runner, prices: dict[str, float], budget: fl
     if not affordable:
         return min(SHELL_ROSTER, key=lambda s: prices[s.name])
     return max(affordable, key=lambda s: _effective_capability(runner, s))
+
+
+# ---------------------------------------------------------------------------
+# WEEKLY RE-EQUIP
+# ---------------------------------------------------------------------------
+def reequip_survivors(runners: list[Runner], market: ShellMarket) -> int:
+    """Weekly upgrade pass: survivors switch to a strictly better shell if affordable.
+
+    A runner upgrades when choose_affordable_shell picks a different shell AND
+    that shell's _effective_capability score is strictly higher than the current
+    shell's score. The capability check prevents lateral churn between shells of
+    equal score and respects the affinity stickiness that builds up over time.
+
+    Credits are deducted for the new shell (paid-upgrade model). Dead runners
+    (marked with _died_this_week) are skipped — they will be replaced by
+    replace_dead_runners instead.
+
+    Returns the number of runners who switched shells this pass.
+    """
+    switched = 0
+    for runner in runners:
+        if getattr(runner, "_died_this_week", False):
+            continue
+        best = choose_affordable_shell(runner, market.prices, runner.credit_balance)
+        if best.name == runner.current_shell:
+            continue
+        # choose_affordable_shell's broke-fallback can return a shell the runner
+        # cannot actually afford — guard explicitly before deducting.
+        if market.prices[best.name] > runner.credit_balance:
+            continue
+        current_cap = _effective_capability(runner, SHELL_BY_NAME[runner.current_shell])
+        new_cap     = _effective_capability(runner, best)
+        if new_cap > current_cap:
+            runner.credit_balance -= market.prices[best.name]
+            switch_shell(runner, best.name)
+            switched += 1
+    return switched
