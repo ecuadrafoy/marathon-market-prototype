@@ -1,6 +1,6 @@
 # Marathon Market Simulator
 
-A console-based market simulation set in the Marathon universe. Players trade stocks in
+A terminal market simulation set in the Marathon universe. Players trade stocks in
 runner companies — bio-synthetic operatives deployed across zones of varying difficulty.
 Stock prices move on weekly runner performance across **all three zones**, but players can
 only monitor one zone directly. The gap between what you can see and what moves the market
@@ -12,10 +12,13 @@ Requires [uv](https://github.com/astral-sh/uv).
 
 ```bash
 uv sync
-uv run python marathon_market.py
-```
 
-Add `--debug` to reveal hidden zone results and the full runner roster each week.
+# Textual TUI (default)
+uv run python marathon_market.py
+
+# Console fallback — plain text, debug-by-default (all hidden zones visible)
+uv run python marathon_market.py --console
+```
 
 ---
 
@@ -105,169 +108,90 @@ You see Perimeter. The market sees everything. This is the core tension:
 
 ---
 
-## What you see each week
+## Interface
 
-### Planning screen
+### Textual TUI (default)
 
-Shown at the start of every week before you commit to Hold or Trade.
-
-```
-────────────────────────────────────────────────────
-  MARATHON MARKET SIMULATOR — WEEK 3
-────────────────────────────────────────────────────
-
-PORTFOLIO
-  Credits:     8,600 cr
-  CyberAcme   5 shares  (@ 461 cr = 2,305 cr)
-  Total value: 10,905 cr
-
-ROSTERS                                   ← roster health at a glance
-  CyberAcme    9 runners  avg 2.3 extractions, 3 career deaths
-  Sekiguchi    9 runners  avg 1.7 extractions, 12 career deaths   ← high churn signal
-  Traxus       9 runners  avg 2.3 extractions, 3 career deaths
-  NuCaloric    9 runners  avg 3.0 extractions, 0 career deaths    ← clean run so far
-
-ZONE INTEL — Perimeter  (Easy)           ← preview only; actual squad assigned at run time
-  (squad lineup randomized at deploy; preview shows roster sample)
-  CyberAcme    [Yara/Thi, Kestrel/Tri, Zephyr/Thi]
-  Sekiguchi    [Tessa/Thi, Pike/Thi, Reno/Thi]
-  Traxus       [Hex/Tri, Daven/Tri, Tully/Thi]
-  NuCaloric    [Quinn/Tri, Juno/Tri, Mire/Des]
-
-MARKET PRICES
-  CyberAcme      461.0 cr  (+21.4% last week)
-  Sekiguchi      310.5 cr  ( -1.9% last week)
-  Traxus         284.9 cr  ( -9.9% last week)
-  NuCaloric      272.9 cr  ( +3.2% last week)
-
-[B]uy  [S]ell  [A]ll in  s[K] shells  [H]old / advance week  [Q]uit
-```
-
-**ROSTERS** — `avg extractions` counts how many times each active runner has successfully
-extracted across their career. `career deaths` is a cumulative company-level count; a
-company with high deaths is fielding aggressive squads or getting unlucky in hard zones —
-expect more rookie-heavy rosters and shell churn.
-
-**ZONE INTEL** — The three runners shown per company are a stable roster preview, not a
-confirmed deployment. The actual squad sent to Perimeter is only locked in when the week
-simulates. Runner names show as `Name/Shl` (first 3 letters of their shell).
-
-### Results screen
-
-Shown after each week simulates.
+The primary interface is a persistent Textual TUI — no scrolling walls of text, all
+information visible simultaneously.
 
 ```
-────────────────────────────────────────────────────
-  RESULTS
-────────────────────────────────────────────────────
-
-YOUR ZONE — Perimeter  (Easy)
-  CyberAcme    Squad RETURNED   [Kite/Des, Cinder/Thi, Echo/Thi]  ← you can see this
-                   140 cr  ·  0 kills
-  Sekiguchi    Squad LOST       [Drift/Roo, Thorne/Ass, Soren/Rec] ← Sekiguchi lost Perimeter...
-                 — no extraction —
-  Traxus       Squad RETURNED   [Shrike/Des, Wynn/Des, Cipher/Tri]
-                   150 cr  ·  6 kills
-  NuCaloric    Squad RETURNED   [Quinn/Tri, Juno/Tri, Mire/Des]
-                    50 cr  ·  3 kills
-
-MARKET RESPONSE  (all zones)             ← driven by ALL zones, not just Perimeter
-  CyberAcme      379.8 →   461.0 cr  ( +21.4%)  [beat expectations]
-  Sekiguchi      316.6 →   310.5 cr  (  -1.9%)  [missed expectations]  ← ...but only -1.9%?
-  Traxus         316.3 →   284.9 cr  (  -9.9%)  [missed expectations]  ← Traxus looked fine here
-  NuCaloric      264.5 →   272.9 cr  (  +3.2%)  [beat expectations]
+┌ MARATHON MARKET  ·  Week 4  ·  PLANNING ─────────────────────────────────────────────┐
+│ status bar                                                                            │
+├─ CyberAcme ──────┬─ Sekiguchi ──────┬─ Traxus ─────────┬─ NuCaloric ───────────────┤
+│ 461.0 cr  +21.4% │ 310.5 cr  -1.9%  │ 284.9 cr  -9.9%  │ 272.9 cr  +3.2%           │
+│                  │                  │                  │                            │
+│  (braille line   │  (braille line   │  (braille line   │  (braille line chart       │
+│   chart of price │   chart, cyan)   │   chart, orange) │   red, last 7 weeks)       │
+│   history, green)│                  │                  │                            │
+│ ──────────────── │ ──────────────── │ ──────────────── │ ─────────────────────────  │
+│ Des×3★ Thf×2★    │ Thi×3★ Tri×2★   │ Des×3★ Tri×2★   │ Tri×5★ Thi×2★ Des×1★      │
+├──────────────────┴──────────┬───────┴──────────────────┴──────┬────────────────────┤
+│ PORTFOLIO                   │ ZONE INTEL                      │ SHELL MARKET       │
+│ Credits:  8,600 cr          │ Perimeter  [Easy]               │ Destroyer  219cr ▲ │
+│ CyberAcme  5sh @ 461 = …    │ CyberAcme  [Yara/Thi …]        │ Thief      241cr ▼ │
+│ Total:    10,905 cr         │ Sekiguchi  [Tessa/Thi …]       │ Triage     263cr · │
+│                             │ …                               │ …                  │
+└─────────────────────────────┴─────────────────────────────────┴────────────────────┘
+  [B]uy  [S]ell  [A]ll-in  [K]shells  [H]old/Advance  [Q]uit
 ```
 
-Notice the asymmetry: Sekiguchi lost their Perimeter squad but barely dropped (-1.9%) —
-their hidden zone squads must have done well. Traxus returned from Perimeter with 6 kills
-but still fell -9.9% — both hidden squads likely struggled or were wiped. **Perimeter is a
-weak signal.** The market has information you don't.
+**Company panels** — one per company, border colour matches brand (CyberAcme green,
+Sekiguchi cyan, Traxus orange, NuCaloric red). Each shows the current price, last week's
+change, a braille line chart of the last 7 price points with expectation dots
+(green=beat / yellow=met / red=missed), and a compact shell composition row.
 
-### Shell market — `[K]`
+**Portfolio** — credits, open positions, total value, and week-over-week gain/loss (shown
+after results).
 
-Press `K` during the planning phase to inspect the shell economy.
+**Zone Intel** — planning phase shows a squad preview for the monitored zone (Perimeter);
+results phase shows each company's Perimeter outcome (RETURNED / LOST, credits, kills).
+
+**Shell Market** — live ticker for all 7 shells: current price, week-over-week delta
+(coloured), trend arrow, and a 6-week sparkline. Updates every time a week resolves.
+
+**Key bindings** (single keypress, always visible in the footer):
+
+| Key | Action |
+|-----|--------|
+| `B` | Buy shares (modal) |
+| `S` | Sell shares (modal) |
+| `A` | All-in — spread available credits equally across all four companies |
+| `K` | Shell market overlay — full price/adoption/sparkline table |
+| `H` / `Enter` | Hold (planning) or advance to next planning phase (results) |
+| `Q` | Quit |
+
+### Console mode — `--console`
+
+```bash
+uv run python marathon_market.py --console
+```
+
+Plain-text fallback — useful for validating game logic without TUI overhead. Debug output
+is **on by default** in console mode: after each week it prints all hidden zone outcomes,
+the full shell market, and each company's shell composition breakdown.
+
+### Shell market overlay — `K`
+
+Press `K` during the planning phase to open the full shell market overlay.
 
 ```
-────────────────────────────────────────────────────
-  SHELL MARKET
-────────────────────────────────────────────────────
-
   Shell          Price      Δ wk       Trend       Adoption
   ──────────  ────────  ────────  ─  ───────  ─────────────
-  Triage        263.5cr     -44.4  ▼   ▁▆▆▁█▃   8 (22.2%) ★  ← above fair share, still expensive
+  Triage        263.5cr     -44.4  ▼   ▁▆▆▁█▃   8 (22.2%) ★
   Thief         241.3cr     -22.2  ▼   ▁██▆▃▁   7 (19.4%) ★
   Destroyer     219.0cr       —    ·   █▇▇▇▁▁   6 (16.7%) ★
-  Recon         196.8cr     +44.4  ▲   ▄▁▁▅▅█   5 (13.9%)    ← rising adoption, rising price
+  Recon         196.8cr     +44.4  ▲   ▄▁▁▅▅█   5 (13.9%)
   Assassin      174.6cr       —    ·   ▁▁▁▁██   4 (11.1%)
   Rook          174.6cr     +22.2  ▲   █▅▅▅▁▅   4 (11.1%)
-  Vandal        130.2cr       —    ·   █▁▁▁██   2 ( 5.6%)    ← cheapest; rarely worn
-
-  ★ Premium archetypes (Destroyer/Thief/Triage):  21/36 (58.3%)
-    Middle shells (Vandal/Assassin/Recon/Rook):   15/36 (41.7%)
-    Fair share (uniform adoption): 14.3% per shell
+  Vandal        130.2cr       —    ·   █▁▁▁██   2 ( 5.6%)
 ```
 
-**Trend column** — `▲/▼/·` indicates week-over-week price direction.
-**Sparkline** — last 6 weeks of price history at a glance (`▁` = low, `█` = high relative to that shell's own range).
-**Adoption** — how many of the 36 total deployed runners are wearing each shell, and what percentage. `★` marks the premium archetypes (capability-optimal when affordable).
+**Sparkline** — last 6 weeks of price history (`▁` = low, `█` = high within that shell's range).
+**Adoption** — runners currently wearing this shell out of 36 total. `★` = premium archetype.
 
-High adoption + rising price = companies still value this shell despite the cost. Low adoption + falling price = the market is abandoning this shell and it's getting cheap — a good window for the next wave of recruits.
-
-### Debug mode — `--debug`
-
-`uv run python marathon_market.py --debug` adds three extra sections after each week's results:
-
-**ALL ZONES BREAKDOWN** — every squad across every zone, including the hidden ones:
-
-```
-ALL ZONES BREAKDOWN  [debug]
-
-▸ Perimeter  (Easy) ★ monitored  pool 12 → 0
-  CyberAcme/P      CAUTIOUS  extracted     2 items,    90cr, 0 kills
-  Sekiguchi/P      SUPPORT   extracted     1 items,   180cr, 0 kills
-  Traxus/P         GREEDY    extracted     5 items,   220cr, 0 kills
-
-▸ Dire Marsh  (Medium) · hidden  pool 8 → 3
-  CyberAcme/DM     GREEDY    ELIMINATED   — squad wiped —
-  Sekiguchi/DM     CAUTIOUS  extracted     2 items,   310cr, 0 kills
-  Traxus/DM        BALANCED  extracted     1 items,    70cr, 2 kills
-
-▸ Outpost  (Hard) · hidden  pool 5 → 5
-  CyberAcme/O      SUPPORT   extracted     0 items,     0cr, 0 kills
-  Sekiguchi/O      GREEDY    ELIMINATED   — squad wiped —
-  Traxus/O         CAUTIOUS  extracted     0 items,     0cr, 0 kills
-```
-
-**SHELL COMPOSITION** — each company's current shell breakdown:
-
-```
-SHELL COMPOSITION  [debug]
-  CyberAcme    Tri×4  Des×3  Thi×2
-  Sekiguchi    Thi×3  Tri×2  Des×1  Roo×1  Ass×1  Rec×1
-  Traxus       Des×3  Tri×2  Thi×2  Van×1  Ass×1
-  NuCaloric    Tri×5  Thi×2  Des×1  Rec×1
-```
-
-**ROSTER DETAIL** — per-runner career stats, sorted by lifetime earnings:
-
-```
-ROSTER DETAIL  [debug]
-
-  ─ Traxus ──────────────────────────────────────────────────────
-    Name        Shell       c/e/s                 Ext   Net cr  Kills    Bal
-    Gale        Triage      0.25/0.31/0.44        1/1      813      0    863   ← top earner
-    Daven       Destroyer   0.76/0.09/0.15        1/1      460      1    510
-    Mara        Destroyer   0.81/0.05/0.14        1/1      377      2    427
-    Fjord       Thief       0.12/0.86/0.01        1/1       24      0     74   ← drifting toward extraction
-    ...
-    Thorne      Recon       0.09/0.33/0.57        0/0        0      0    164   ← fresh recruit, no runs yet
-```
-
-`c/e/s` = combat / extraction / support attributes (always sum to 1.0). Veterans show
-visible drift toward their shell's affinity; a `Thief` runner with high extraction is
-starting to look like a true specialist. Fresh recruits show their random starting point.
-`Bal` = spendable credit balance (earns from extractions; will fund a shell upgrade in a
-future version).
+High adoption + rising price means companies still value this shell despite the cost.
+Low adoption + falling price means a cheap entry window for the next recruitment wave.
 
 ---
 
@@ -295,11 +219,15 @@ Paste the output into `runner_sim/market/pricing.py`.
 
 ```bash
 uv run python marathon_market.py [--debug]
+uv run python marathon_market.py --console [--debug]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--debug` | Reveals all hidden zone results, shell composition, and full roster detail after each week. |
+| *(none)* | Launches the Textual TUI. |
+| `--console` | Plain-text console mode. Debug output (hidden zones, shell breakdown) is on by default. |
+| `--debug` | TUI only — reserved for future use; console mode ignores it (always debug). |
+| `--trace-ai` | Print every behaviour-tree extraction/engagement decision to stdout. |
 
 ### `runner_sim` — Standalone runner harness
 
