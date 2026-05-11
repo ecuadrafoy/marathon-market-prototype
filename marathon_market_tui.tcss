@@ -41,7 +41,7 @@ CompanyPanel {
 
 #bottom-row {
     layout: horizontal;
-    height: 18;
+    height: 12;
 }
 
 #portfolio-panel {
@@ -51,8 +51,14 @@ CompanyPanel {
 }
 
 #zone-intel-panel {
-    width: 1fr;
+    width: 2fr;
     border: solid $accent;
+    padding: 0 1;
+}
+
+#shell-ticker-panel {
+    width: 2fr;
+    border: solid $primary-darken-1;
     padding: 0 1;
 }
 

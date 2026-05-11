@@ -6,7 +6,9 @@ Launched by marathon_market.py when run as __main__.
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
+import plotext as _plt
 from rich.text import Text as RichText
 
 from textual import work
@@ -45,12 +47,23 @@ class WeekComplete(Message):
 
 
 # ---------------------------------------------------------------------------
+# CHART CONSTANTS
+# ---------------------------------------------------------------------------
+# plotext color per company — RGB tuples avoid name-lookup ambiguity across versions
+_CHART_COLOR: dict[str, Any] = {
+    "CyberAcme": (0, 210, 80),      # green
+    "Sekiguchi":  (0, 200, 220),     # cyan
+    "Traxus":     (255, 140, 0),     # orange
+    "NuCaloric":  (220, 50, 50),     # red
+}
+_EXP_DOT_COLOR = {"beat": "green+", "met": "yellow", "missed": "red+"}
+
+
+# ---------------------------------------------------------------------------
 # WIDGETS
 # ---------------------------------------------------------------------------
 class CompanyPanel(Widget):
-    """Displays one company: price, change, and a top-to-bottom timeline bar chart."""
-
-    _COLOR = {"beat": "green", "met": "yellow", "missed": "red"}
+    """Displays one company: current price, plotext line chart, compact shell row."""
 
     def __init__(self, company_name: str) -> None:
         super().__init__(id=company_name.lower())
@@ -68,9 +81,11 @@ class CompanyPanel(Widget):
 
         state = self._state
         company = next(c for c in state.companies if c.name == self.company_name)
+        # subtract 2 for border, 2 for padding (CompanyPanel has padding: 0 1)
         content_width = max(12, self.size.width - 4)
+        # pass available height; _render_chart caps internally to avoid stretching
+        chart_height = max(3, self.size.height - 2 - 3)
 
-        chart_data = self._chart_data(state)
         text = RichText()
 
         # ── Price + last-week change ─────────────────────────────────────────
@@ -85,76 +100,75 @@ class CompanyPanel(Widget):
                     )
         text.append("\n")
 
-        # ── Horizontal timeline bars (one row per week, oldest → newest) ────
-        self._render_timeline(text, chart_data, content_width)
+        # ── Plotext line chart ───────────────────────────────────────────────
+        text.append_text(self._render_chart(state, content_width, chart_height))
 
-        # ── Shell composition ────────────────────────────────────────────────
+        # ── Shell composition (one compact line) ─────────────────────────────
         text.append("─" * content_width + "\n", style="dim")
-        self._render_shells(text, state, content_width)
+        self._render_shells_compact(text, state)
 
         return text
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
-    def _chart_data(self, state: GameState) -> list[tuple[int, float, str]]:
-        """Returns [(week_num, price, label), …] for the last 6 completed weeks."""
+    def _render_chart(self, state: GameState, width: int, height: int) -> RichText:
         prices = state.price_history.get(self.company_name, [])
-        exp_map = {w: l for w, cn, l in state.expectation_history if cn == self.company_name}
-        return [
-            (i, prices[i], exp_map.get(i, "met expectations"))
-            for i in range(1, len(prices))
-        ][-6:]
 
-    def _render_timeline(
-        self,
-        text: RichText,
-        data: list[tuple[int, float, str]],
-        content_width: int,
-    ) -> None:
-        if not data:
-            text.append("  no data yet\n", style="dim")
-            return
+        if len(prices) < 2:
+            # No weeks simulated yet — blank padding so layout is stable
+            return RichText("\n" * height)
 
-        prices = [p for _, p, _ in data]
-        lo, hi = min(prices), max(prices)
-        span = hi - lo
+        # Show up to 7 points: the initial price (week 0) plus 6 weekly closes
+        window = prices[-7:]
+        start_week = len(prices) - len(window)
+        x = list(range(start_week, start_week + len(window)))
+        exp_map = {w: lbl for w, cn, lbl in state.expectation_history
+                   if cn == self.company_name}
 
-        # Layout per row:  "W12 " (4) + bar + " 380cr" (6)
-        label_w = 4
-        price_w = 7
-        bar_w = max(4, content_width - label_w - price_w)
+        brand_color = _CHART_COLOR.get(self.company_name, "white")
 
-        for week_num, price, label in data:
-            key = label.split()[0]
-            color = self._COLOR.get(key, "white")
+        # Cap chart size so it doesn't stretch awkwardly when panels are large.
+        # Width fills the panel (needed for readable x-ticks); height is capped
+        # at 9 rows so the chart looks proportional rather than filling all space.
+        chart_w = width
+        chart_h = min(height, 9)
 
-            filled = (
-                max(1, min(bar_w, round((price - lo) / span * bar_w)))
-                if span >= 0.01 else bar_w // 2
-            )
-            empty = bar_w - filled
+        _plt.clf()
+        _plt.plot_size(chart_w, chart_h)
+        # Transparent backgrounds so the chart blends with Textual's dark theme
+        _plt.canvas_color("default")
+        _plt.axes_color("default")
+        _plt.ticks_color("white")
+        _plt.plot(x, window, color=brand_color, marker="braille")
 
-            text.append(f"W{week_num:<2} ", style="dim")
-            text.append("▓" * filled, style=color)
-            text.append("░" * empty, style="dim")
-            text.append(f" {price:.0f}cr\n", style="dim")
+        # Overlay a colored dot at each post-week close, colored by expectation
+        for xi, price in zip(x, window):
+            if xi > 0 and xi in exp_map:
+                dot = _EXP_DOT_COLOR.get(exp_map[xi].split()[0], "white")
+                _plt.scatter([xi], [price], color=dot, marker="●")
 
-    def _render_shells(self, text: RichText, state: GameState, content_width: int) -> None:
+        _plt.xticks(x, [str(xi) for xi in x])
+        _plt.yfrequency(3)
+
+        chart_str = _plt.build()
+        _plt.clf()
+
+        return RichText.from_ansi(chart_str)
+
+    def _render_shells_compact(self, text: RichText, state: GameState) -> None:
         roster = state.rosters.get(self.company_name)
         if not roster:
+            text.append("\n")
             return
-
         counts = Counter(r.current_shell for r in roster.runners)
-
         for shell_name, count in counts.most_common():
-            price = state.market.prices.get(shell_name, 0)
             is_premium = shell_name in PREMIUM_SHELLS
             abbrev = shell_name[:3]
-            marker = "★" if is_premium else " "
-            text.append(f"{abbrev} ", style="bold")
-            text.append(f"×{count}  ", style="white")
-            text.append(marker + " ", style="yellow" if is_premium else "dim")
-            text.append(f"{price:.0f}cr\n", style="dim")
+            text.append(f"{abbrev}×{count}", style="bold" if is_premium else "white")
+            if is_premium:
+                text.append("★", style="yellow")
+            text.append("  ", style="dim")
+        text.append("\n")
 
 
 class PortfolioPanel(Static):
@@ -186,28 +200,6 @@ class PortfolioPanel(Static):
         else:
             lines.append(f"Total:    [bold]{_fmt_cr(total)}[/bold]")
             self._value_before = total
-
-        # ── Shell market trends ──────────────────────────────────────────────
-        lines.append("")
-        lines.append("[dim]── Shell Market ─────────────────────────────[/dim]")
-
-        market = state.market
-        prev_prices = market.price_history[-2] if len(market.price_history) >= 2 else {}
-
-        for shell in sorted(SHELL_ROSTER, key=lambda s: -market.prices[s.name]):
-            price  = market.prices[shell.name]
-            prev   = prev_prices.get(shell.name, price)
-            delta  = price - prev
-            arrow  = _trend_arrow(delta)
-            spark  = _sparkline([snap.get(shell.name, BASE_SHELL_PRICE)
-                                  for snap in market.price_history])
-            marker = "[yellow]★[/yellow]" if shell.name in PREMIUM_SHELLS else " "
-            d_color = "green" if delta > 0.5 else "red" if delta < -0.5 else "white"
-            d_str   = f"{delta:+.1f}" if abs(delta) >= 0.05 else "  — "
-            lines.append(
-                f"  {shell.name:<10} {price:>6.1f}cr  "
-                f"[{d_color}]{d_str:>5}[/{d_color}] {arrow}  [dim]{spark}[/dim] {marker}"
-            )
 
         self.update("\n".join(lines))
 
@@ -243,6 +235,36 @@ class ZoneIntelPanel(Static):
                         detail = "no extraction"
                     lines.append(f"[dim]{r.company_name:<12}[/dim] {status}")
                     lines.append(f"  [{names}]  {detail}")
+
+        self.update("\n".join(lines))
+
+
+class ShellTickerPanel(Static):
+    """Live shell market ticker — price, weekly delta, trend arrow, sparkline."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__("", **kwargs)
+        self.border_title = "SHELL MARKET"
+
+    def refresh_content(self, state: GameState) -> None:
+        market = state.market
+        prev_prices = market.price_history[-2] if len(market.price_history) >= 2 else {}
+
+        lines = []
+        for shell in sorted(SHELL_ROSTER, key=lambda s: -market.prices[s.name]):
+            price   = market.prices[shell.name]
+            prev    = prev_prices.get(shell.name, price)
+            delta   = price - prev
+            arrow   = _trend_arrow(delta)
+            spark   = _sparkline([snap.get(shell.name, BASE_SHELL_PRICE)
+                                   for snap in market.price_history])
+            marker  = "[yellow]★[/yellow]" if shell.name in PREMIUM_SHELLS else " "
+            d_color = "green" if delta > 0.5 else "red" if delta < -0.5 else "dim"
+            d_str   = f"{delta:+.1f}" if abs(delta) >= 0.05 else "  —"
+            lines.append(
+                f"{shell.name:<10} {price:>6.1f}cr "
+                f"[{d_color}]{d_str:>5}[/{d_color}] {arrow} [dim]{spark}[/dim] {marker}"
+            )
 
         self.update("\n".join(lines))
 
@@ -467,6 +489,7 @@ class MarathonMarketApp(App):
         with Horizontal(id="bottom-row"):
             yield PortfolioPanel(id="portfolio-panel")
             yield ZoneIntelPanel(id="zone-intel-panel")
+            yield ShellTickerPanel(id="shell-ticker-panel")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -546,3 +569,4 @@ class MarathonMarketApp(App):
 
         self.query_one(PortfolioPanel).refresh_content(s, phase)
         self.query_one(ZoneIntelPanel).refresh_content(s, phase)
+        self.query_one(ShellTickerPanel).refresh_content(s)
