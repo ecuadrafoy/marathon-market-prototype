@@ -1,9 +1,50 @@
 name,tier,credit_value,perimeter_weight,dire_marsh_weight,outpost_weight
-Scrap Chip,1,50,0.7,0.2,0.05
-Coolant Cell,1,40,0.6,0.25,0.0
-Relay Module,2,150,0.2,0.5,0.2
-Calibrator,2,180,0.15,0.5,0.25
-Neural Splice,3,400,0.05,0.2,0.4
-Optic Array,3,450,0.0,0.15,0.45
-Bio-Core,4,1000,0.0,0.05,0.3
-Memory Crystal,4,1200,0.0,0.0,0.25
+Ballistic Turbine,4,1000,0,0.2,0.4
+Biolens Seed,4,1000,0.1,0.4,0.5
+Enzyme Replicator,4,1000,0,0.1,0.4
+Reflex Coil,4,1000,0,0.3,0.5
+Neural Insulation,4,1000,0.1,0.3,0.4
+Predictive Framework,4,1000,0.2,0,0
+Amygdala Drive,3,300,0,0,0.25
+Ablative Compound,3,300,0,0,0.35
+Breach Catalyst,3,300,0,0,0.35
+Collapsed Lattice,3,300,0,0.1,0.3
+Kinetic Dampener,3,300,0,0,0.3
+Anomalous Wire,3,300,0.25,0,0
+Biomata Node,3,300,0.25,0,0
+Biomata Resin,3,300,0,0.4,0
+Centrinite Rods,3,300,0,0.4,0
+Dynamic Lens,3,50,0.3,0,0
+Nanozymes,3,50,0,0.25,0
+Neurochem Pack,3,50,0,0,0.4
+Paradox Circuit,3,300,0.25,0,0.4
+Polymer Wire,3,50,0.25,0,0
+Steel Rodes,3,50,0.25,0,0
+Sterilized Biostripping,3,300,0.25,0.4,0
+Tarax Seed,3,300,0.3,0.5,0
+Tachyon Filament,3,300,0,0.5,0
+Toughtwave Lens,3,300,0,0.4,0
+Volatile Compounds,3,300,0,0.25,0.4
+Altered Wire,2,50,0.5,0,0
+Dynamic Compounds,2,50,0,0.5,0
+Aluminum Rods,2,10,0.5,0,0
+Basic Xerogel,2,10,0,0.5,0
+Carbon Wire,2,10,0.5,0,0
+Deimosite Rods,2,50,0,0.5,0
+Dermachem Pack,2,50,0,0,0.5
+Drone Node,2,50,0,0,0.5
+Epoxy Resin,2,10,0,0,0.5
+Fractal Circuit,2,50,0.4,0,0.5
+Hydrocabon Rubber,2,10,0.5,0,0
+Nanocomposites,2,10,0,0.5,0
+Plastic filament,2,10,0.5,0,0
+Putty Explosive,2,10,0,0.5,0
+Replaimed Biostripping,2,10,0.4,0.5,0
+Spark Leaf,2,10,0,0.6,0
+Storage Drive,2,10,0,0.6,0
+Surveillance Lens,2,50,0,0.4,0
+Unstable Biomass,1,10,0.6,0.8,0
+Unstable Diode,1,10,0.7,0,0.8
+Unstable Gel,1,10,0,0.8,0.9
+Unstable Gunmetal,1,10,0.6,0.8,0
+Unstable Lead,1,10,0,0.6,0.8
