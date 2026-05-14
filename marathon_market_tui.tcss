@@ -110,3 +110,13 @@ Footer {
     padding: 1 2;
     overflow-y: auto;
 }
+
+/* Runner registry screen */
+#runner-registry-container {
+    width: 90%;
+    height: 90%;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+    overflow-y: auto;
+}

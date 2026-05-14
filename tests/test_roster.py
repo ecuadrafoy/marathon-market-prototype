@@ -3,9 +3,8 @@ Tests for runner_sim/market/roster.py
 
 Key invariants:
   - Simplex triple always sums to 1.0 and all components are non-negative
-  - replace_dead_runners restores roster to exactly STARTING_ROSTER_SIZE
-  - total_deaths accumulates correctly and is not reset when the runner is removed
-  - No runner ID appears twice in a roster after replacements
+  - cull_dead_runners removes only flagged runners and accumulates total_deaths
+  - No runner ID appears twice in a roster after creation
 """
 
 import pytest
@@ -15,7 +14,7 @@ from runner_sim.market.roster import (
     CompanyRoster,
     _random_simplex_triple,
     create_roster,
-    replace_dead_runners,
+    cull_dead_runners,
 )
 from runner_sim.market.shell_market import make_initial_market
 
@@ -76,11 +75,14 @@ class TestCreateRoster:
 
 
 # ---------------------------------------------------------------------------
-# replace_dead_runners / total_deaths
+# cull_dead_runners / total_deaths
 # ---------------------------------------------------------------------------
-class TestReplaceDeadRunners:
+# The v0 `replace_dead_runners` auto-hired fresh recruits whenever runners
+# died. v1 splits responsibilities: `cull_dead_runners` removes flagged
+# runners and accumulates `total_deaths`; refilling rosters is the job of
+# the company-AI bidding flow in week.py + company_strategy.py.
+class TestCullDeadRunners:
     def _roster_with_deaths(self, n_dead: int) -> tuple[CompanyRoster, set[str]]:
-        """Create a fresh roster and mark n_dead runners as killed this week."""
         market = make_initial_market()
         used: set[str] = set()
         roster = create_roster("TestCo", market, used)
@@ -89,57 +91,36 @@ class TestReplaceDeadRunners:
             runner.death_count += 1
         return roster, used
 
-    def test_roster_restored_to_nine_after_one_death(self):
-        market = make_initial_market()
-        roster, used = self._roster_with_deaths(1)
-        replace_dead_runners(roster, market, used)
-        assert len(roster.runners) == STARTING_ROSTER_SIZE
+    def test_dead_runners_removed_from_roster(self):
+        roster, _ = self._roster_with_deaths(3)
+        cull_dead_runners(roster)
+        assert len(roster.runners) == STARTING_ROSTER_SIZE - 3
+        assert all(not getattr(r, "_died_this_week", False) for r in roster.runners)
 
-    def test_roster_restored_to_nine_after_three_deaths(self):
-        """One full squad wipe — the most common loss scenario."""
-        market = make_initial_market()
-        roster, used = self._roster_with_deaths(3)
-        replace_dead_runners(roster, market, used)
-        assert len(roster.runners) == STARTING_ROSTER_SIZE
+    def test_returns_the_dead_runners(self):
+        roster, _ = self._roster_with_deaths(2)
+        dead = cull_dead_runners(roster)
+        assert len(dead) == 2
+        for r in dead:
+            assert getattr(r, "_died_this_week", False) is True
 
     def test_total_deaths_accumulates(self):
-        """total_deaths should count deaths across multiple weeks, not reset."""
-        market = make_initial_market()
-        roster, used = self._roster_with_deaths(3)
-        replace_dead_runners(roster, market, used)
+        roster, _ = self._roster_with_deaths(3)
+        cull_dead_runners(roster)
         assert roster.total_deaths == 3
 
-        # Kill 2 more in the following week
         for runner in roster.runners[:2]:
             runner._died_this_week = True
             runner.death_count += 1
-        replace_dead_runners(roster, market, used)
+        cull_dead_runners(roster)
         assert roster.total_deaths == 5
 
-    def test_survivors_not_removed(self):
-        """Runners without _died_this_week must remain in the roster."""
-        market = make_initial_market()
-        roster, used = self._roster_with_deaths(3)
-        survivor_ids_before = {r.id for r in roster.runners if not getattr(r, "_died_this_week", False)}
-        replace_dead_runners(roster, market, used)
-        survivor_ids_after = {r.id for r in roster.runners}
-        assert survivor_ids_before.issubset(survivor_ids_after)
-
-    def test_new_recruits_have_unique_ids(self):
-        """Fresh recruits must not share IDs with each other or survivors."""
-        market = make_initial_market()
-        roster, used = self._roster_with_deaths(3)
-        replace_dead_runners(roster, market, used)
-        ids = [r.id for r in roster.runners]
-        assert len(ids) == len(set(ids))
-
     def test_zero_deaths_leaves_roster_unchanged(self):
-        """No sentinel set → nothing changes, total_deaths stays 0."""
         market = make_initial_market()
         used: set[str] = set()
         roster = create_roster("TestCo", market, used)
         ids_before = [r.id for r in roster.runners]
-        replace_dead_runners(roster, market, used)
-        ids_after = [r.id for r in roster.runners]
-        assert ids_before == ids_after
+        dead = cull_dead_runners(roster)
+        assert dead == []
+        assert [r.id for r in roster.runners] == ids_before
         assert roster.total_deaths == 0

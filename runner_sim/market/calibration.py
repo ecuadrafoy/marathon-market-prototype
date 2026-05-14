@@ -16,11 +16,18 @@ import statistics
 
 from runner_sim.market.roster import (
     CompanyRoster,
+    RECRUIT_ALLOWANCE,
+    _hire_one,
     create_roster,
     collect_used_names,
     all_runners,
 )
 from runner_sim.market.shell_market import ShellMarket, make_initial_market, update_prices
+from runner_sim.market.company_strategy import (
+    INITIAL_FREE_AGENT_BENCH,
+    RunnerIdCounter,
+)
+from runner_sim.runners import Runner
 
 
 # ---------------------------------------------------------------------------
@@ -38,25 +45,45 @@ DEFAULT_COMPANY_NAMES: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 def bootstrap_default_state(
     company_names: tuple[str, ...] = DEFAULT_COMPANY_NAMES,
-) -> tuple[dict[str, CompanyRoster], ShellMarket]:
-    """Build initial rosters + shell market in lockstep.
+    seed_free_agents: int = INITIAL_FREE_AGENT_BENCH,
+) -> tuple[dict[str, CompanyRoster], ShellMarket, list[Runner], RunnerIdCounter]:
+    """Build initial rosters + shell market + free-agent bench in lockstep.
+
+    All runners (rosters + free agents) draw ids from a single shared counter
+    so cross-roster migration never causes id collisions.
 
     Each company hires STARTING_ROSTER_SIZE recruits from a uniform-price
-    shelf (BASE_SHELL_PRICE for every shell). Once all recruits are placed,
-    update_prices runs once so the market reflects week-0 adoption.
+    shelf (BASE_SHELL_PRICE for every shell). After roster creation, an
+    additional `seed_free_agents` recruits are spawned into the free-agent
+    pool — they hold no shell yet (assigned when a company signs them).
 
-    Returns: (rosters_by_company_name, shell_market)
+    Returns: (rosters_by_company_name, shell_market, free_agents, id_supplier)
     """
     market = make_initial_market()
     rosters: dict[str, CompanyRoster] = {}
     used_names: set[str] = set()
+    id_supplier = RunnerIdCounter()
 
     for company_name in company_names:
-        rosters[company_name] = create_roster(company_name, market, used_names)
+        rosters[company_name] = create_roster(
+            company_name, market, used_names, id_supplier=id_supplier
+        )
+
+    free_agents: list[Runner] = []
+    for _ in range(seed_free_agents):
+        rookie = _hire_one(
+            company_name="",
+            runner_id=id_supplier(),
+            market=market,
+            used_names=used_names,
+        )
+        rookie.current_shell = ""             # no shell until a company signs them
+        rookie.credit_balance = RECRUIT_ALLOWANCE
+        free_agents.append(rookie)
 
     # Capture the initial week-0 adoption so prices have signal before week 1.
     update_prices(market, all_runners(rosters))
-    return rosters, market
+    return rosters, market, free_agents, id_supplier
 
 
 # ---------------------------------------------------------------------------
@@ -85,11 +112,15 @@ def headless_calibration(weeks: int = 1000, seed: int = 42) -> tuple[float, floa
     from runner_sim.zone_sim.zones import ZONES
     from runner_sim.zone_sim.items import load_items
 
-    rosters, market = bootstrap_default_state()
+    rosters, market, _free_agents, _id_supplier = bootstrap_default_state()
     item_catalog = load_items()
 
     per_company_credits: list[float] = []
     for _ in range(weeks):
+        # Calibration mode runs simulate_week WITHOUT the company-AI loop
+        # (no companies/free_agents/id_supplier), so deaths vanish into the
+        # void and rosters are not refilled — same behaviour as before, used
+        # only for re-deriving pricing constants.
         result = simulate_week(rosters, market, ZONES, item_catalog)
         per_company_credits.extend(r.total_credits_extracted for r in result.company_results)
 

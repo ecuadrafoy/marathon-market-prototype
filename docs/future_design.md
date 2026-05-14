@@ -226,6 +226,55 @@ account for available supply.
 
 ---
 
+## Valuation: Sell-Side Economic Coupling
+
+**Status:** the valuation system itself is *built* (three-axis company state:
+`price` weekly, `budget` weekly, `valuation` quarterly). This note captures
+one **deliberately deferred** design question about how player selling
+should couple to company finances.
+
+### Current behaviour (v1)
+
+- **Buying** has two effects: the full purchase price flows *immediately*
+  into `Company.budget` (`PLAYER_BUY_TO_BUDGET_RATIO = 1.0`), and `+1 score
+  per share` accrues to `pending_valuation_delta` for the next quarterly
+  report.
+- **Selling** has *only one* effect: `-1 score per share` accrues to
+  `pending_valuation_delta`. It does **not** touch `Company.budget`
+  (`PLAYER_SELL_CLAWBACK_RATIO = 0.0`).
+
+So the valuation side is symmetric (±1 score/share), but the budget side is
+asymmetric: buying funds operations, selling does not drain them. This
+mirrors the finance distinction between a primary capital raise and a
+secondary-market trade.
+
+### The deferred question
+
+Is the budget asymmetry the right long-term feel, or should selling have a
+direct operational consequence? Two alternatives, both with one-line knobs
+already in place:
+
+- **Sell-side clawback** — set `PLAYER_SELL_CLAWBACK_RATIO > 0` so selling
+  literally drains `Company.budget`. Turns a sell into an economic attack:
+  a player can starve a company of operating capital, not just dent its
+  reputation. Risk: griefing / accidental bankruptcy of a company the
+  player actually likes.
+- **Defer the buy side too** — route the buy-side budget injection through
+  the quarterly counter instead of applying it immediately. Makes buying a
+  pure reputation signal with no instant operational fuel. Cleaner symmetry,
+  but removes the "buy to fund a recovery this week" play.
+
+### Where it plugs in
+
+- `marathon_market.py` — `PLAYER_BUY_TO_BUDGET_RATIO`,
+  `PLAYER_SELL_CLAWBACK_RATIO` constants; `GameEngine.do_buy` / `do_sell`.
+- `valuation_delta_for_event` — the per-event counter weights.
+
+Decision deferred until the valuation system has been play-tested enough to
+know whether the current asymmetry feels good or flat.
+
+---
+
 ## Recruitment & Roster Ecosystem Adjustments
 
 A loose group of smaller adjustments that came up while documenting the
@@ -401,6 +450,7 @@ Current equilibrium: ~58% premium / ~42% middle. To push further:
 | Strategic recruitment | `runner_sim/market/roster.py` | `_hire_one`, `choose_affordable_shell` |
 | Board membership tiers | `marathon_market.py`, new `Portfolio` methods | `Portfolio.ownership_pct`, `Company.total_shares` |
 | Veil lifting on owned companies | `marathon_market.py:print_results` | conditional zone_results render |
+| Valuation sell-side coupling | `marathon_market.py` | `PLAYER_SELL_CLAWBACK_RATIO`, `do_buy`/`do_sell` |
 | Permadeath softening | `runner_sim/market/week.py:apply_zone_outcome` | death branch |
 | Mid-career shell upgrades | `runner_sim/market/week.py` (new function) | called per-week |
 | Shell market scarcity | `runner_sim/market/shell_market.py` | new supply tracking |

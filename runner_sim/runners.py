@@ -68,10 +68,15 @@ class Runner:
     net_loot: float = 0.0
     eliminations: int = 0
     death_count: int = 0
+    deployments_survived: int = 0   # weeks the runner was deployed and did not die
 
     # --- spending budget (debited on shell purchase at recruitment;
     #     credited weekly by per-runner extraction credit share) ---
     credit_balance: float = 0.0
+
+    # --- company-AI bookkeeping (v1: budget + free-agent pool) ---
+    upkeep_cost: float = 0.0        # recomputed at start of payroll each week
+    weeks_orphaned: int = 0         # 0 while employed; ticks up while in the free-agent pool
 
 
 # ---------------------------------------------------------------------------

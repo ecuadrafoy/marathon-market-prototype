@@ -14,7 +14,8 @@ The split between simulate_week (orchestration) and apply_zone_outcome
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+import random
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -37,9 +38,22 @@ from runner_sim.market.pricing import (
 )
 from runner_sim.market.roster import (
     CompanyRoster,
+    _hire_one,
     all_runners,
     collect_used_names,
-    replace_dead_runners,
+    cull_dead_runners,
+)
+from runner_sim.market.company_strategy import (
+    CompanyRosterEvents,
+    RunnerIdCounter,
+    collect_company_income,
+    decide_acquisitions,
+    decide_voluntary_drops,
+    company_health,
+    release_to_free_agents,
+    resolve_bidding,
+    settle_payroll,
+    tick_free_agent_pool,
 )
 from runner_sim.market.shell_market import ShellMarket, update_prices, reequip_survivors
 from runner_sim.zone_sim.items import Item
@@ -64,10 +78,13 @@ class WeekSimulationResult:
     zones; intended for debug display, charts, and analysis.
     co_squads_by_company maps company_name → zone_name → Squad; used to
     extract per-company, per-zone outcomes for debug display.
+    roster_events maps company_name → CompanyRosterEvents for this week —
+    deaths, signings, drops, orphans — so the UI can communicate timing.
     """
     company_results: list["CompanyWeekResult"]
     zone_results: dict[str, ZoneRunResult]
     co_squads_by_company: dict[str, dict[str, Squad]]
+    roster_events: dict[str, CompanyRosterEvents] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +118,9 @@ def apply_zone_outcome(
         runner.shell_history.append(runner.current_shell)
         return
 
+    # Survived the week — counts toward longevity-based upkeep value.
+    runner.deployments_survived += 1
+
     if squad_extracted:
         runner.extraction_successes += 1
         runner.net_loot += credits_received        # lifetime career stat
@@ -122,8 +142,13 @@ def apply_zone_outcome(
 def _update_runners_for_squad(
     squad: Squad,
     combat_events: list[CombatEvent],
+    credits_by_runner_id: dict[int, float] | None = None,
 ) -> None:
-    """Apply per-runner updates for one squad after a zone run."""
+    """Apply per-runner updates for one squad after a zone run.
+
+    If credits_by_runner_id is provided, also records each runner's per-week
+    extraction credit share (used by company_strategy.collect_company_income).
+    """
     breakdown = _squad_breakdown(squad.runners)
 
     # Per-runner credit share. Distribute squad.loot.total_credits() across
@@ -151,13 +176,16 @@ def _update_runners_for_squad(
             kill_shares += event_kills
 
     for idx, runner in enumerate(squad.runners):
+        credit = float(credit_shares[idx])
         apply_zone_outcome(
             runner,
             squad_extracted=squad.extracted,
             squad_eliminated=squad.eliminated,
-            credits_received=float(credit_shares[idx]),
+            credits_received=credit,
             kills_attributed=int(kill_shares[idx]),
         )
+        if credits_by_runner_id is not None and credit > 0.0:
+            credits_by_runner_id[runner.id] = credits_by_runner_id.get(runner.id, 0.0) + credit
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +205,7 @@ def _build_company_result(
     co_squads: dict[str, Squad],
     monitored_zone_name: str,
     zone_results: dict[str, ZoneRunResult],
+    expected_squad_count: int | None = None,
 ) -> CompanyWeekResult:
     """Aggregate one company's per-zone squad outcomes into a CompanyWeekResult.
 
@@ -223,7 +252,11 @@ def _build_company_result(
     else:
         monitored_kills = 0
 
-    baseline = compute_baseline(squads_deployed=len(co_squads))
+    # Baseline reflects market expectation: the company "should have" fielded
+    # expected_squad_count squads. Under-deploying due to roster shortfall is
+    # visibly punished here — the market doesn't care why you fell short.
+    expected = expected_squad_count if expected_squad_count is not None else len(co_squads)
+    baseline = compute_baseline(squads_deployed=expected)
     delta = total_credits - baseline
     pct = compute_price_change_pct(total_credits, baseline)
     price_after = max(price_before * (1.0 + pct / 100.0), 1.0)  # PRICE_FLOOR=1.0
@@ -258,27 +291,61 @@ def simulate_week(
     zones: list[Zone],
     item_catalog: list[Item],
     company_prices: dict[str, float] | None = None,
+    companies: list | None = None,
+    free_agents: list | None = None,
+    id_supplier: RunnerIdCounter | None = None,
+    price_histories: dict[str, list[float]] | None = None,
+    rng: random.Random | None = None,
 ) -> WeekSimulationResult:
     """Run one full week of the integrated simulation.
 
     Args:
-        rosters:        company name → CompanyRoster (mutated: deaths, recruits)
-        market:         shell market (mutated: prices updated end-of-week)
-        zones:          list of Zones to run (typically all 3)
-        item_catalog:   loaded item list
-        company_prices: optional {company_name: current_stock_price}; used to
-                        seed CompanyWeekResult.price_before. If None, every
-                        company's price_before is set to 0.0 (calibration mode).
+        rosters:         company name → CompanyRoster (mutated: payroll, signings)
+        market:          shell market (mutated: prices updated end-of-week)
+        zones:           list of Zones to run (typically all 3)
+        item_catalog:    loaded item list
+        company_prices:  optional {company_name: current_stock_price}; seeds
+                         CompanyWeekResult.price_before. If None, calibration
+                         mode — price_before = 0.0 for everyone and the
+                         company-AI loop is skipped.
+        companies:       list[Company] — required when running the AI loop.
+                         Used for budget mutation and health classification.
+        free_agents:     mutable list[Runner] — closed-pool reserve, mutated
+                         each week (orphaning + bidding + retirement).
+        id_supplier:     RunnerIdCounter — shared across rosters + free agents
+                         so newly spawned rookies get globally unique ids.
+        price_histories: per-company price history (last 4+ entries needed
+                         for the struggling/thriving signal).
+        rng:             random.Random used for bidding-draft order. Threaded
+                         for determinism under seeded tests.
 
     Returns:
         WeekSimulationResult containing the player-facing company_results
-        and the engine-internal zone_results (full ZoneRunResult per zone,
-        including match_log and combat_events).
+        and the engine-internal zone_results (full ZoneRunResult per zone).
     """
-    # --- 1. Build per-zone deployment lists ---
+    ai_enabled = companies is not None and free_agents is not None and id_supplier is not None
+    rng = rng or random.Random()
+    used_names = collect_used_names(rosters)
+    if free_agents is not None:
+        used_names.update(r.name for r in free_agents)
+
+    # Per-company event log — populated through the week's phases. Even in
+    # calibration mode we initialise the dict so callers can access it safely.
+    roster_events: dict[str, CompanyRosterEvents] = {
+        name: CompanyRosterEvents() for name in rosters
+    }
+
+    # --- 1. Build per-zone deployment lists from the CURRENT rosters ---
+    # Rosters of <6 sit out the week — the company is too broke to field anyone.
+    # This is the "deploy what you have" phase: AI doesn't make headcount
+    # decisions until AFTER it sees this week's outcome (post-deployment).
+    from runner_sim.market.deployment import MIN_ROSTER_FOR_DEPLOYMENT
     deployments: dict[str, list[tuple[str, Squad]]] = {z.name: [] for z in zones}
     co_squads_by_company: dict[str, dict[str, Squad]] = {}
     for company_name, roster in rosters.items():
+        if len(roster.runners) < MIN_ROSTER_FOR_DEPLOYMENT:
+            co_squads_by_company[company_name] = {}
+            continue
         zone_to_squad = assign_squads(roster, zones)
         co_squads_by_company[company_name] = zone_to_squad
         for zone_name, squad in zone_to_squad.items():
@@ -291,11 +358,11 @@ def simulate_week(
         zone_results[zone.name] = run_zone(zone, squads_in_zone, item_catalog)
 
     # --- 3. Per-runner state updates (drift, affinity, kill/death, credit) ---
-    # Iterate per zone so the right combat_events are passed for kill attribution.
+    credits_by_runner_id: dict[int, float] = {}
     for zone in zones:
         events = zone_results[zone.name].combat_events
         for (_, squad) in deployments[zone.name]:
-            _update_runners_for_squad(squad, events)
+            _update_runners_for_squad(squad, events, credits_by_runner_id)
 
     # --- 4. Aggregate per-company results ---
     monitored_zone_names = [z.name for z in zones if z.monitored]
@@ -312,23 +379,109 @@ def simulate_week(
             co_squads=co_squads_by_company[company_name],
             monitored_zone_name=monitored,
             zone_results=zone_results,
+            expected_squad_count=len(zones),
         ))
 
-    # --- 5. Replace dead runners ---
-    used_names = collect_used_names(rosters)
-    for roster in rosters.values():
-        replace_dead_runners(roster, market, used_names)
-        # Refresh used_names — a death-replacement pass may have added new names.
-        used_names = collect_used_names(rosters)
+    # --- 5. Route dead runners. In AI mode: → free-agent pool (closed-pool model,
+    # bodies destroyed, consciousness preserved). In calibration mode: replace with
+    # fresh hires to keep rosters at full size — preserves the steady-state
+    # assumptions baked into pricing.py's calibrated constants.
+    if ai_enabled:
+        for company_name, roster in rosters.items():
+            dead = cull_dead_runners(roster)
+            for r in dead:
+                roster_events[company_name].died.append(r.name)
+                release_to_free_agents(r, free_agents)
+    else:
+        used_names_calib = collect_used_names(rosters)
+        for roster in rosters.values():
+            dead = cull_dead_runners(roster)
+            for _ in dead:
+                new_id = roster.next_runner_id
+                roster.next_runner_id += 1
+                roster.runners.append(
+                    _hire_one(roster.company_name, new_id, market, used_names_calib)
+                )
+            used_names_calib = collect_used_names(rosters)
 
-    # --- 5.5. Weekly re-equip: surviving runners upgrade to best affordable shell ---
+    # --- 6. Company AI cycle — runs AFTER deployment so decisions see outcomes.
+    # Order matches the natural employment cycle: earn → pay → adjust headcount.
+    if ai_enabled:
+        # 6a. Income — credits from this week's extraction fund this week's payroll.
+        for company in companies:
+            collect_company_income(company, rosters[company.name], credits_by_runner_id)
+
+        # 6b. Settle payroll — runners we can't afford go to the free-agent pool.
+        for company in companies:
+            roster = rosters[company.name]
+            _kept, orphaned = settle_payroll(company, roster)
+            for r in orphaned:
+                roster_events[company.name].orphaned_unaffordable.append(r.name)
+                release_to_free_agents(r, free_agents)
+
+        # 6c. Voluntary drops — struggling companies dump expensive runners
+        # to make room for cheaper rookies next week.
+        for company in companies:
+            history = (price_histories or {}).get(company.name, [])
+            health = company_health(history)
+            drops = decide_voluntary_drops(company, rosters[company.name], health)
+            for r in drops:
+                roster_events[company.name].voluntarily_dropped.append(r.name)
+                release_to_free_agents(r, free_agents)
+
+        # 6d. Age the free-agent pool — retire idle, spawn rookies if needed.
+        # Happens after orphan/drop so this week's releases get weeks_orphaned=0
+        # rather than 1 immediately.
+        total_employed = sum(len(r.runners) for r in rosters.values())
+        tick_free_agent_pool(
+            free_agents=free_agents,
+            total_employed=total_employed,
+            market=market,
+            used_names=used_names,
+            id_supplier=id_supplier,
+        )
+
+        # 6e. Bidding draft — each company signs from the FA pool to refill.
+        bids_by_company: dict[str, list[tuple]] = {}
+        for company in companies:
+            history = (price_histories or {}).get(company.name, [])
+            health = company_health(history)
+            roster = rosters[company.name]
+            slots_needed = 9 - len(roster.runners)
+            bids_by_company[company.name] = decide_acquisitions(
+                company, roster, free_agents, health, slots_needed
+            )
+        signed = resolve_bidding(
+            companies=companies,
+            rosters=rosters,
+            free_agents=free_agents,
+            bids_by_company=bids_by_company,
+            rng=rng,
+            target_roster_size=9,
+        )
+        for co_name, runners_signed in signed.items():
+            for r in runners_signed:
+                roster_events[co_name].signed.append(r.name)
+
+        # 6f. Re-equip any roster runner without a shell (signed free agents or
+        # rookies arriving with current_shell=""). Reuses the existing shell market.
+        from runner_sim.market.shell_market import choose_affordable_shell
+        for roster in rosters.values():
+            for r in roster.runners:
+                if not r.current_shell:
+                    shell = choose_affordable_shell(r, market.prices, r.credit_balance)
+                    r.current_shell = shell.name
+                    r.credit_balance = max(r.credit_balance - market.prices[shell.name], 0.0)
+
+    # --- 7. Weekly re-equip: surviving runners upgrade to best affordable shell ---
     reequip_survivors(all_runners(rosters), market)
 
-    # --- 6. Update shell market based on new (post-recruitment) adoption ---
+    # --- 8. Update shell market based on new (post-recruitment) adoption ---
     update_prices(market, all_runners(rosters))
 
     return WeekSimulationResult(
         company_results=results,
         zone_results=zone_results,
         co_squads_by_company=co_squads_by_company,
+        roster_events=roster_events,
     )

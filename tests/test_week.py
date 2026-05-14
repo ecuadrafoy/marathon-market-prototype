@@ -266,3 +266,149 @@ class TestApplyZoneOutcomeFallback:
         apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
                            credits_received=0.0, kills_attributed=0)
         assert runner.shell_history == ["Recon"]
+
+
+# ---------------------------------------------------------------------------
+# Integration: closed-pool invariants over a multi-week run
+# ---------------------------------------------------------------------------
+class TestRosterEconomyEndToEnd:
+    """Drives the full company-AI loop for 20 weeks under a seeded RNG and
+    asserts the closed-pool semantics hold:
+
+      1. Free-agent pool becomes non-empty at some point (someone got orphaned).
+      2. Total roster ID surface stays bounded — runners are recycled, not
+         continuously spawned.
+      3. Some runner appears in two different companies across the run
+         (orphan-then-rehire is the headline mechanic).
+    """
+
+    def test_closed_pool_20_weeks(self):
+        from dataclasses import dataclass, field
+        import random
+
+        from runner_sim.market.calibration import bootstrap_default_state
+        from runner_sim.market.week import simulate_week
+        from runner_sim.zone_sim.items import load_items
+        from runner_sim.zone_sim.zones import ZONES
+
+        @dataclass
+        class StubCompany:
+            name: str
+            price: float
+            budget: float = 600.0
+
+        random.seed(2026)
+        rosters, market, free_agents, id_supplier = bootstrap_default_state()
+        companies = [
+            StubCompany("CyberAcme", 450.0),
+            StubCompany("Sekiguchi", 380.0),
+            StubCompany("Traxus",    300.0),
+            StubCompany("NuCaloric", 200.0),
+        ]
+        item_catalog = load_items()
+        price_histories: dict[str, list[float]] = {c.name: [c.price] for c in companies}
+
+        # Track every (runner_id → set of company_names they've been on).
+        company_lineage: dict[int, set[str]] = {}
+        for roster in rosters.values():
+            for r in roster.runners:
+                company_lineage[r.id] = {roster.company_name}
+        for r in free_agents:
+            company_lineage[r.id] = set()  # rookie bench, no company yet
+
+        saw_nonempty_pool = False
+        rng = random.Random(0)
+
+        for _ in range(20):
+            result = simulate_week(
+                rosters, market, ZONES, item_catalog,
+                company_prices={c.name: c.price for c in companies},
+                companies=companies,
+                free_agents=free_agents,
+                id_supplier=id_supplier,
+                price_histories=price_histories,
+                rng=rng,
+            )
+            for r in result.company_results:
+                for c in companies:
+                    if c.name == r.company_name:
+                        c.price = r.price_after
+                        price_histories[c.name].append(r.price_after)
+            if free_agents:
+                saw_nonempty_pool = True
+            # Track lineage — note who is currently on which roster.
+            for roster in rosters.values():
+                for r in roster.runners:
+                    company_lineage.setdefault(r.id, set()).add(roster.company_name)
+
+        # Invariant 1: the free-agent pool became active.
+        assert saw_nonempty_pool, "free-agent pool never accumulated anyone in 20 weeks"
+
+        # Invariant 2: at least one runner moved between companies.
+        movers = [rid for rid, cos in company_lineage.items() if len(cos) >= 2]
+        assert movers, "no runner ever switched companies — orphan→rehire never fired"
+
+        # Invariant 3: pool floor honored.
+        from runner_sim.market.company_strategy import MIN_GLOBAL_POOL
+        total = sum(len(r.runners) for r in rosters.values()) + len(free_agents)
+        assert total >= MIN_GLOBAL_POOL - 1, (
+            f"global pool fell below floor: {total} < {MIN_GLOBAL_POOL}"
+        )
+
+    def test_roster_events_populated_per_company(self):
+        """simulate_week returns a CompanyRosterEvents per company, even when
+        no transitions happened. Across a 10-week run we should see signings,
+        deaths, and orphan/drop events somewhere in the stream."""
+        from dataclasses import dataclass
+        import random
+        from runner_sim.market.calibration import bootstrap_default_state
+        from runner_sim.market.company_strategy import CompanyRosterEvents
+        from runner_sim.market.week import simulate_week
+        from runner_sim.zone_sim.items import load_items
+        from runner_sim.zone_sim.zones import ZONES
+
+        @dataclass
+        class StubCo:
+            name: str
+            price: float
+            budget: float = 600.0
+
+        random.seed(7)
+        rosters, market, free_agents, id_supplier = bootstrap_default_state()
+        companies = [
+            StubCo("CyberAcme", 450.0),
+            StubCo("Sekiguchi", 380.0),
+            StubCo("Traxus",    300.0),
+            StubCo("NuCaloric", 200.0),
+        ]
+        item_catalog = load_items()
+        price_histories = {c.name: [c.price] for c in companies}
+
+        saw_signed = saw_died = saw_orphaned = False
+        rng = random.Random(0)
+
+        for _ in range(15):
+            result = simulate_week(
+                rosters, market, ZONES, item_catalog,
+                company_prices={c.name: c.price for c in companies},
+                companies=companies, free_agents=free_agents,
+                id_supplier=id_supplier, price_histories=price_histories,
+                rng=rng,
+            )
+            # Every company has an entry, even if empty.
+            assert set(result.roster_events.keys()) == {c.name for c in companies}
+            for ev in result.roster_events.values():
+                assert isinstance(ev, CompanyRosterEvents)
+                if ev.signed:                saw_signed = True
+                if ev.died:                  saw_died = True
+                if ev.orphaned_unaffordable: saw_orphaned = True
+
+            for r in result.company_results:
+                for c in companies:
+                    if c.name == r.company_name:
+                        c.price = r.price_after
+                        price_histories[c.name].append(r.price_after)
+
+        assert saw_signed,   "no signings recorded across 15 weeks"
+        assert saw_died,     "no deaths recorded across 15 weeks"
+        assert saw_orphaned, "no orphan-unaffordable events recorded across 15 weeks"

@@ -30,6 +30,8 @@ from marathon_market import (
     _fmt_cr,
     _fmt_pct,
     _prices_dict,
+    _registry_groups,
+    _runner_top_affinity,
     _sparkline,
     _trend_arrow,
     _expectation_label,
@@ -70,9 +72,11 @@ class CompanyPanel(Widget):
         self.company_name = company_name
         self.border_title = company_name
         self._state: GameState | None = None
+        self._phase: str = "planning"
 
-    def refresh_content(self, state: GameState) -> None:
+    def refresh_content(self, state: GameState, phase: str = "planning") -> None:
         self._state = state
+        self._phase = phase
         self.refresh()
 
     def render(self) -> RichText:
@@ -99,6 +103,66 @@ class CompanyPanel(Widget):
                         style="green" if pct >= 0 else "red",
                     )
         text.append("\n")
+
+        # ── Budget + roster size + valuation (compact line under price) ──────
+        # pending_valuation_delta is now a SCORE (counter), not cr. The cr
+        # impact at the next report = score × VALUATION_CR_PER_COUNTER.
+        from marathon_market import VALUATION_CR_PER_COUNTER
+        roster_size = len(state.rosters[self.company_name].runners)
+        score = company.pending_valuation_delta
+        projected_cr = score * VALUATION_CR_PER_COUNTER
+        report = (state.last_quarterly_reports or {}).get(self.company_name)
+        if report is not None and self._phase == "results":
+            before, delta, _after = report
+            sign = "+" if delta >= 0 else ""
+            color = "bright_green" if delta >= 0 else "bright_red"
+            text.append(f"budget {company.budget:.0f} cr · {roster_size} runners\n", style="dim")
+            text.append("Q-report  ", style="bold yellow")
+            text.append(f"val {before:.0f} → {company.valuation:.0f}  ", style="white")
+            text.append(f"({sign}{delta:.0f})\n", style=color)
+        elif score != 0:
+            # Show the score + projected-cr impact so the player can read both.
+            sign = "+" if score > 0 else ""
+            cr_sign = "+" if projected_cr > 0 else ""
+            pending_style = "green" if score > 0 else "red"
+            text.append(f"budget {company.budget:.0f} cr · {roster_size} runners\n", style="dim")
+            text.append(f"val {company.valuation:.0f} cr  ", style="dim")
+            text.append(
+                f"({sign}{score:.0f} score → {cr_sign}{projected_cr:.0f} cr)\n",
+                style=pending_style,
+            )
+        else:
+            text.append(
+                f"budget {company.budget:.0f} cr · {roster_size} runners · val {company.valuation:.0f} cr\n",
+                style="dim",
+            )
+
+        # ── Roster events from the most recent advance_week ──────────────────
+        # Split by cause so the timeline is unambiguous:
+        #   results:    deaths (what happened DURING the zone deployment)
+        #   planning:   signings / orphans / drops (what the AI did AFTER)
+        #   simulating: nothing — keep the panel calm while sim is running
+        events = (state.last_roster_events or {}).get(self.company_name)
+        if events is not None and self._phase != "simulating":
+            parts: list[tuple[str, str]] = []
+            if self._phase == "results":
+                if events.died:
+                    parts.append((f"-{len(events.died)} lost", "red"))
+                else:
+                    parts.append(("roster held", "green"))
+            else:  # planning
+                if events.signed:
+                    parts.append((f"+{len(events.signed)} signed", "green"))
+                if events.orphaned_unaffordable:
+                    parts.append((f"-{len(events.orphaned_unaffordable)} orphaned", "yellow"))
+                if events.voluntarily_dropped:
+                    parts.append((f"-{len(events.voluntarily_dropped)} dropped", "yellow"))
+            for i, (label, color) in enumerate(parts):
+                if i > 0:
+                    text.append(" · ", style="dim")
+                text.append(label, style=color)
+            if parts:
+                text.append("\n")
 
         # ── Plotext line chart ───────────────────────────────────────────────
         text.append_text(self._render_chart(state, content_width, chart_height))
@@ -200,6 +264,14 @@ class PortfolioPanel(Static):
         else:
             lines.append(f"Total:    [bold]{_fmt_cr(total)}[/bold]")
             self._value_before = total
+
+        # Free-agent pool — a one-line read on the runner labor market.
+        if state.free_agents:
+            longest = max(r.weeks_orphaned for r in state.free_agents)
+            lines.append(
+                f"[dim]FA pool:  {len(state.free_agents)} idle · "
+                f"longest {longest}w[/dim]"
+            )
 
         self.update("\n".join(lines))
 
@@ -457,6 +529,95 @@ class ShellMarketScreen(ModalScreen):
         return "\n".join(lines)
 
 
+class RunnerRegistryScreen(ModalScreen):
+    """Full-screen overlay — every runner in the world, grouped by contract.
+
+    Mirrors ShellMarketScreen in shape so the player gets a consistent
+    deep-dive view. Each row: name, current shell, weekly upkeep cost,
+    deployments survived, career kills, career net loot, top shell affinity,
+    plus idle-weeks for free agents.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("enter", "dismiss", "Close"),
+    ]
+
+    DEFAULT_CSS = """
+    RunnerRegistryScreen { align: center middle; }
+    """
+
+    def __init__(self, state: GameState) -> None:
+        super().__init__()
+        self._state = state
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="runner-registry-container"):
+            yield Static(self._build_content(), id="runner-registry-body")
+            yield Label("[dim]Escape or Enter to close[/dim]", id="runner-registry-footer")
+
+    def _build_content(self) -> str:
+        groups = _registry_groups(self._state)
+        total_runners = sum(len(rs) for _, _, rs in groups)
+
+        # Column widths matched to the console layout for consistency.
+        header_row = (
+            f"  {'Name':<10}  {'Shell':<10}  {'Upkeep':>8}  "
+            f"{'Surv':>4}  {'Kills':>5}  {'Loot':>7}  {'Affinity':<14}  {'Idle':>4}"
+        )
+        rule = "  " + "─" * (len(header_row) - 2)
+
+        lines: list[str] = [
+            f"[bold]RUNNER REGISTRY[/bold]  ·  Week {self._state.week}",
+            "",
+        ]
+
+        for group_name, payroll, runners in groups:
+            is_free_agents = (group_name == "FREE AGENTS")
+            n = len(runners)
+            if is_free_agents:
+                longest = max((r.weeks_orphaned for r in runners), default=0)
+                title = (
+                    f"[bold yellow]FREE AGENTS[/bold yellow]  "
+                    f"[dim]({n} idle · longest idle {longest}w)[/dim]"
+                )
+            else:
+                title = (
+                    f"[bold]{group_name}[/bold]  "
+                    f"[dim]({n} runners · payroll {payroll} cr/wk)[/dim]"
+                )
+            lines.append(title)
+            lines.append(header_row)
+            lines.append(rule)
+
+            for r in runners:
+                shell_label = r.current_shell if r.current_shell else "—"
+                aff_shell, aff_value = _runner_top_affinity(r)
+                aff_str = f"{aff_shell[:3]} {aff_value:.2f}" if aff_value > 0 else "—"
+                premium = aff_shell in PREMIUM_SHELLS and aff_value >= 0.3
+                aff_cell = f"{aff_str} [yellow]★[/yellow]" if premium else aff_str
+                idle_str = f"{r.weeks_orphaned}w" if is_free_agents else " —"
+                # Color stat cells by magnitude — quick visual scan of veterans.
+                upkeep_color = "yellow" if r.upkeep_cost >= 60 else "white"
+                lines.append(
+                    f"  {r.name[:10]:<10}  {shell_label[:10]:<10}  "
+                    f"[{upkeep_color}]{r.upkeep_cost:>6.0f}cr[/{upkeep_color}]  "
+                    f"{r.deployments_survived:>4d}  {r.eliminations:>5d}  "
+                    f"{r.net_loot:>7.0f}  {aff_cell:<14}  {idle_str:>4}"
+                )
+
+            if not runners:
+                lines.append("  [dim](none)[/dim]")
+            lines.append("")
+
+        lines.append(f"[dim]Total runners in world: {total_runners}[/dim]")
+        lines.append(
+            "[dim][yellow]★[/yellow] = veteran with ≥ 0.30 affinity to a premium shell "
+            "(Destroyer/Thief/Triage)[/dim]"
+        )
+        return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # MAIN APP
 # ---------------------------------------------------------------------------
@@ -469,6 +630,7 @@ class MarathonMarketApp(App):
         Binding("s", "sell", "Sell"),
         Binding("a", "all_in", "All-in"),
         Binding("k", "shells", "Shells"),
+        Binding("r", "runners", "Roster"),
         Binding("h", "advance_week", "Hold/Advance"),
         Binding("enter", "advance_week", "Advance", show=False),
         Binding("q", "quit", "Quit"),
@@ -516,6 +678,9 @@ class MarathonMarketApp(App):
 
     def action_shells(self) -> None:
         self.push_screen(ShellMarketScreen(self.engine.state))
+
+    def action_runners(self) -> None:
+        self.push_screen(RunnerRegistryScreen(self.engine.state))
 
     def action_advance_week(self) -> None:
         if self.phase == "planning":
@@ -565,7 +730,7 @@ class MarathonMarketApp(App):
         self.query_one("#status-bar", Label).update(status)
 
         for panel in self.query(CompanyPanel):
-            panel.refresh_content(s)
+            panel.refresh_content(s, phase)
 
         self.query_one(PortfolioPanel).refresh_content(s, phase)
         self.query_one(ZoneIntelPanel).refresh_content(s, phase)
