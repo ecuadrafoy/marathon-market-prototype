@@ -35,38 +35,85 @@ runs validate feel/equilibrium that unit tests can't capture.
 
 ## Architecture
 
-All simulation logic lives in `marathon_market.py`. `charts.py` imports from it for analysis only.
+`marathon_market.py` is the entry point — Textual TUI (`marathon_market_tui.py`)
+or console (`marathon_market_console.py`). It owns the player-facing layer only:
+`GameEngine`, the `Company`/`Portfolio`/`GameState` dataclasses, the buy/sell
+actions, and the quarterly valuation report. All *simulation* logic lives under
+`runner_sim/`. `charts.py` imports from `runner_sim` for analysis only.
 
-**Data flow each week:**
-1. `assign_runners_standard` or `assign_runners_skill_matched` → `list[Runner]` (runners generated with zone + company assignment but not yet resolved)
-2. `compute_company_result` calls `resolve_runner` on each runner in place, mutating `Runner.success` and `Runner.yield_value`
-3. `_compute_baseline` and `_compute_price_change_pct` translate company performance into a price delta; `Company.price` is mutated directly
-4. `planning_loop` / `print_results` handle all player-facing I/O
+> **Economy reference:** `docs/economy.md` is the single living document for
+> every price/value system and the maths behind it (stock price, operating
+> budget, valuation, shell market, runner wallets, loot credits, and how they
+> interlink). Treat it as the source of truth for anything economy-related,
+> and update it in the same commit as any economy change.
 
-**Two runner assignment modes:**
-- **Standard** — runners distributed randomly across zones, then randomly to companies within each zone
-- **Skill-matched** — all skills generated upfront, sorted descending; each runner is weighted toward harder zones based on `zone.difficulty × runner.skill`. This creates a correlation between zone difficulty and runner quality that the player cannot directly observe (only the monitored zone is visible)
+**Week pipeline** — `GameEngine.advance_week` (`marathon_market.py`) calls
+`simulate_week` (`runner_sim/market/week.py`), which orchestrates one week:
 
-**Information asymmetry is core to the design.** The player sees runner headcounts in Perimeter (monitored) only. Stock prices move on performance across *all three zones*. The visible zone is intentionally a weak signal — price surprises come from hidden zones. `CompanyWeekResult` carries both `monitored_*` fields (player intel) and aggregate fields (actual price driver) to keep this split explicit.
+1. **Deploy** — `assign_squads` (`market/deployment.py`) chunks each company's
+   `CompanyRoster` into 2–3 squads and assigns one per zone. Rosters below
+   `MIN_ROSTER_FOR_DEPLOYMENT` (6) sit the week out.
+2. **Run zones** — `run_zone` (`zone_sim/sim.py`) per zone: a tick loop where
+   all squads share one finite loot pool. Per tick — explore → encounter →
+   engage/disengage → combat → kill-loot → extraction decision. Per-doctrine
+   extract/engage choices are driven by behaviour trees (see "AI behaviour
+   trees" below).
+3. **Per-runner state** — `_update_runners_for_squad` / `apply_zone_outcome`
+   mutate each `Runner` in place: career stats, `credit_balance`, shell
+   affinity, attribute drift, and the death sentinel.
+4. **Aggregate** — `_build_company_result` rolls each company's squads into a
+   `CompanyWeekResult`, computing the price delta via `compute_baseline` +
+   `compute_price_change_pct` (`market/pricing.py`).
+5. **Route the dead** — eliminated runners go to the closed free-agent pool
+   (AI mode) or are replaced with fresh hires (calibration mode).
+6. **Company-AI cycle** — only when `companies`/`free_agents`/`id_supplier` are
+   passed. Runs *after* deployment so decisions react to the week's actual
+   outcome: income → payroll → voluntary drops → free-agent ageing → bidding
+   draft → re-equip. All in `market/company_strategy.py`.
+7. **Shell market** — `reequip_survivors` then `update_prices`
+   (`market/shell_market.py`) recompute shell prices from the new roster
+   composition.
 
-**Market formula pipeline** (`_compute_price_change_pct`):
-- `performance_score = success_rate × average_yield` (per company, all zones)
-- `baseline = BASE_EXPECTATION × headcount_factor` — market expectation based purely on runner count, which the player can observe
-- `delta = performance_score - baseline`, normalized by `MAX_PERF_SCORE`
-- `price_change_pct = (normalized_delta × DELTA_MULTIPLIER) + uniform_noise`
+`advance_week` then writes `price_after` back onto each `Company.price`,
+accrues per-event valuation counter scores, and fires the quarterly valuation
+report every `QUARTERLY_REPORT_WEEKS` (12).
 
-**Yield formula** (in `resolve_runner`):
-```python
-yield_value = (50 + skill * 100) * (1 + difficulty**2 * 8)
-```
-The quadratic multiplier is intentional — see `docs/yield_design.md` for the EV analysis that motivated it. The `8` coefficient is the primary tuning lever for zone risk/reward balance.
+**Runners are persistent identities.** A `Runner` lives on a `CompanyRoster`
+across weeks, accumulating career stats, shell affinity, and a `credit_balance`
+wallet. Squads are an ephemeral weekly grouping, not an identity — there is no
+"runner assignment mode". `assign_squads` is the single deployment override
+point (player-controlled deployment is a future hook).
 
-**Tunable constants** are grouped at the top of `marathon_market.py` under `TUNABLE CONSTANTS`. `BASE_EXPECTATION` (34.4) is empirically derived from a 1000-week simulation — recalibrate it if zone count, runner count, or the yield formula changes significantly.
+**Information asymmetry is core to the design.** The player sees only the
+monitored zone (Perimeter — `zone.monitored`). Stock prices move on
+`total_credits_extracted` across *all three zones*, so the visible zone is an
+intentionally weak signal — price surprises come from hidden zones.
+`CompanyWeekResult` carries both `monitored_*` fields (player intel) and
+aggregate fields (the actual price driver) to keep this split explicit.
+
+**Credits originate as loot.** Squads extract `Item`s (each with a flat
+`credit_value`) from finite per-zone pools defined in `data/items.csv` and
+`data/zones.csv`; a squad's take is `Squad.loot.total_credits()`. Everything
+downstream — stock price, budgets, wallets, valuation — is a transformation of
+that weekly credit stream. The stock-price formula is
+`delta = total_credits_extracted − (BASE_EXPECTATION × squads_deployed)`,
+normalized by `EXPECTED_DELTA_RANGE`; `squads_deployed` is passed as
+`len(zones)` (3), so an under-strength roster is punished automatically. See
+`docs/economy.md` §3 for the loot model and §4 for the pricing maths.
+
+**Tunable constants** are no longer in one place — each subsystem owns its
+constants (`pricing.py`, `shell_market.py`, `company_strategy.py`,
+`deployment.py`, `runners.py`), plus a player/valuation block at the top of
+`marathon_market.py`. `docs/economy.md` §11 is the consolidated reference.
+`BASE_EXPECTATION` (408.83) and `EXPECTED_DELTA_RANGE` in `pricing.py` are
+empirically derived by `market/calibration.py:headless_calibration` — re-run it
+if zone count, roster size, the item catalog, or the credit path changes
+significantly.
 
 ## Key design constraints
 
-- The continuous yield curve is prototype scaffolding for a future **loot table system** (discrete item rarities per zone). The formula interface — `resolve_runner` returning a `yield_value` float — is stable; the internals will be replaced.
-- Runner `skill` is a single composite float intentionally. It will expand into multi-stat compositions later; all formulas treat it as a black box.
+- The **loot table system** is live: discrete `Item`s with tiered `credit_value`s drawn from finite per-zone pools (`data/items.csv`, `data/zones.csv`). It replaced the old continuous yield curve — there is no `resolve_runner`/`yield_value` path anymore. Item generation and the rarity bands are still being tuned; the data files are the tuning surface.
+- A `Runner`'s capability is a three-axis composition — `combat`, `extraction`, `support` (career attributes that sum to 1.0) — blended with shell affinity into `effective_capability`. The old single composite `skill` float is gone; formulas operate on the per-axis vector.
 - Non-traded factions (MIDA, Arachne, UESC) and multi-zone monitoring are out of scope for this prototype.
 
 ## AI behaviour trees
