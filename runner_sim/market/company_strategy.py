@@ -53,12 +53,142 @@ ORPHAN_RETIRE_AFTER_WEEKS      = 8       # idle free agents leave the world afte
 MIN_GLOBAL_POOL                = 42      # 4·9 employed + 6 bench floor; rookie spawns below
 INITIAL_FREE_AGENT_BENCH       = 8       # week-0 seed so week-1 bidding has contention
 
-# Health signal — drives struggling/thriving heuristics.
+# Health signal — drives struggling/thriving heuristics (legacy derived view).
 STRUGGLE_MA_WINDOW             = 3
 STRUGGLE_THRESHOLD             = 0.97    # below MA × this → struggling
 THRIVE_THRESHOLD               = 1.03    # above MA × this → thriving
 
+# ── Strategic posture (continuous, persistent state) ──
+# Two axes: momentum (fast EMA, "how are we doing now") and risk_appetite
+# (slow accumulator, "what kind of company we've become"). All companies
+# start at (0.0, 0.0); divergence is emergent from accumulated outcomes.
+# Future event-system events will mutate these directly.
+MOMENTUM_EMA_ALPHA              = 0.3    # weight on this-week signal; 0.7 retained → half-life ~2 wk
+RISK_APPETITE_STEP              = 0.02   # nominal per-week drift on a mixed week
+RISK_APPETITE_WIPE_PENALTY      = 0.08   # all-squads-eliminated trauma (4× baseline drift)
+RISK_APPETITE_SWEEP_BONUS       = 0.04   # all-squads-extracted hot streak (2× baseline drift)
+PRICE_CHANGE_NORM               = 5.0    # divides price_change_pct to land in ~[-1, +1]
+
+# Health bucket thresholds when deriving Health from posture (for display/legacy).
+POSTURE_HEALTH_THRIVE_AT        = 0.25
+POSTURE_HEALTH_STRUGGLE_AT      = -0.25
+
+# ── Loan system (emergency financing for struggling companies) ──
+# When a company is about to sit out (roster < 6) with no remaining cash,
+# they can auto-take a 1500cr loan to fund a recovery bid. Loans must be
+# repaid within a quarter or they accrue a compounding valuation penalty.
+LOAN_AMOUNT                     = 1500.0   # principal per loan
+LOAN_TERM_WEEKS                 = 12       # repayment window (= QUARTERLY_REPORT_WEEKS)
+LOAN_TRIGGER_BUDGET_THRESHOLD   = 500.0    # below this AND would sit out → trigger
+LOAN_REPAY_BUDGET_THRESHOLD     = 3000.0   # auto-repay once budget exceeds this
+MAX_OUTSTANDING_LOANS           = 3        # hard cap on stacking debt
+
 Health = Literal["thriving", "neutral", "struggling"]
+
+
+# ---------------------------------------------------------------------------
+# LOAN — emergency financing instrument
+# ---------------------------------------------------------------------------
+@dataclass
+class Loan:
+    """An emergency loan a company can take when about to sit out.
+
+    Auto-repaid when the company's budget rises above LOAN_REPAY_BUDGET_THRESHOLD.
+    If left outstanding past the quarterly mark, accrues a -5 valuation counter
+    at each subsequent quarterly tick (compounding pain). Repaying it fires a
+    one-time +3 counter reward.
+    """
+    amount: float = LOAN_AMOUNT
+    week_taken: int = 0
+    repaid: bool = False
+    week_repaid: int | None = None
+
+
+def outstanding_loans(loans: list[Loan]) -> list[Loan]:
+    """Filter to currently-outstanding (unrepaid) loans."""
+    return [l for l in loans if not l.repaid]
+
+
+def overdue_loans(loans: list[Loan], current_week: int) -> list[Loan]:
+    """Outstanding loans whose age exceeds LOAN_TERM_WEEKS."""
+    return [
+        l for l in loans
+        if not l.repaid and (current_week - l.week_taken) >= LOAN_TERM_WEEKS
+    ]
+
+
+def take_loan_if_needed(
+    company,
+    roster: CompanyRoster,
+    current_week: int,
+) -> Loan | None:
+    """Auto-loan decision — call at the end of the AI cycle.
+
+    Triggers a loan when ALL of:
+      • budget < LOAN_TRIGGER_BUDGET_THRESHOLD
+      • roster size below MIN_ROSTER_FOR_DEPLOYMENT (would sit out next week)
+      • outstanding loans count < MAX_OUTSTANDING_LOANS
+
+    Returns the new Loan (also appended to company.loans), or None.
+    """
+    from runner_sim.market.deployment import MIN_ROSTER_FOR_DEPLOYMENT
+    if company.budget >= LOAN_TRIGGER_BUDGET_THRESHOLD:
+        return None
+    if len(roster.runners) >= MIN_ROSTER_FOR_DEPLOYMENT:
+        return None
+    if len(outstanding_loans(company.loans)) >= MAX_OUTSTANDING_LOANS:
+        return None
+    loan = Loan(amount=LOAN_AMOUNT, week_taken=current_week)
+    company.budget += LOAN_AMOUNT
+    company.loans.append(loan)
+    return loan
+
+
+def auto_repay_loan(
+    company,
+    current_week: int,
+) -> Loan | None:
+    """Auto-repay logic — call at the end of the AI cycle.
+
+    When budget exceeds LOAN_REPAY_BUDGET_THRESHOLD and at least one loan is
+    outstanding, pay off the OLDEST outstanding loan. Marks it repaid and
+    returns it. Caller is responsible for firing the loan_repaid valuation
+    event (kept out of this fn to avoid coupling to marathon_market.py).
+    """
+    outstanding = outstanding_loans(company.loans)
+    if not outstanding:
+        return None
+    if company.budget < LOAN_REPAY_BUDGET_THRESHOLD:
+        return None
+    # Repay the oldest first (FIFO).
+    oldest = min(outstanding, key=lambda l: l.week_taken)
+    company.budget -= oldest.amount
+    oldest.repaid = True
+    oldest.week_repaid = current_week
+    return oldest
+
+
+# ---------------------------------------------------------------------------
+# STRATEGIC POSTURE — continuous, persistent state on Company
+# ---------------------------------------------------------------------------
+@dataclass
+class PostureState:
+    """Two-axis strategic posture: how a company feels and who it's becoming.
+
+    Both axes range over [-1.0, +1.0]:
+      - momentum: fast EMA from this-week outcomes. Half-life ~2 weeks.
+      - risk_appetite: slow accumulator from accumulated history. Takes
+        ~10+ weeks to swing; traumas (full wipes) hit ~4× harder than
+        baseline drift, so reputation is fragile.
+
+    All companies init at (0.0, 0.0). No pre-loaded personality — every
+    company starts identical and diverges purely from outcomes. Future
+    events (MIDA / UESC / Arachne, random events) will mutate these
+    fields directly; update_posture is the only writer today.
+    """
+    momentum: float = 0.0
+    risk_appetite: float = 0.0
+    weeks_observed: int = 0    # diagnostic; lets tests assert convergence pace
 
 
 # ---------------------------------------------------------------------------
@@ -80,16 +210,18 @@ class RunnerIdCounter:
 # ---------------------------------------------------------------------------
 @dataclass
 class CompanyRosterEvents:
-    """Per-company roster changes recorded during one week's cycle.
+    """Per-company roster + financing changes recorded during one week's cycle.
 
-    The simulator splits these by *cause* so the UI can communicate the
-    timing — deaths happen *during* deployment, the other three happen
-    *after* (when the AI reacts to the week's outcomes).
+    Roster events are split by *cause* so the UI can communicate timing —
+    deaths happen *during* deployment, signings/drops/orphans happen *after*
+    (when the AI reacts), loans happen at the very end of the AI cycle.
     """
     signed: list[str] = field(default_factory=list)                 # hired via bidding draft
     voluntarily_dropped: list[str] = field(default_factory=list)    # cut for being too expensive
     orphaned_unaffordable: list[str] = field(default_factory=list)  # couldn't make payroll
     died: list[str] = field(default_factory=list)                   # killed in zone deployment
+    loans_taken: int = 0                                            # new loans this week
+    loans_repaid: int = 0                                           # loans settled this week
 
     @property
     def total_gained(self) -> int:
@@ -181,6 +313,11 @@ def company_health(price_history: list[float]) -> Health:
     """Classify the company based on current price vs. a 3-week moving average.
 
     Fewer than STRUGGLE_MA_WINDOW prior prices → neutral (no signal yet).
+
+    LEGACY: this function survives for callers that only have price history
+    (e.g. UI / display code). The AI decision path no longer uses it — it
+    reads `company.posture` directly. See `posture_to_health` for the
+    posture-based equivalent.
     """
     if len(price_history) < STRUGGLE_MA_WINDOW + 1:
         return "neutral"
@@ -197,25 +334,94 @@ def company_health(price_history: list[float]) -> Health:
 
 
 # ---------------------------------------------------------------------------
+# POSTURE UPDATE + DERIVED HEALTH VIEW
+# ---------------------------------------------------------------------------
+def update_posture(
+    posture: PostureState,
+    price_change_pct: float,
+    squads_deployed: int,
+    squads_returned: int,
+    squads_eliminated: int,
+) -> None:
+    """Mutate posture in place from this week's outcome.
+
+    Called at the end of simulate_week, after the bidding draft. The posture
+    used by THIS week's deployment was the posture going INTO the week; we
+    only update it here so that the next week's deploy + decisions read a
+    posture that reflects what just happened.
+    """
+    # Momentum — fast EMA. Blend price signal + return rate as the per-week input.
+    if squads_deployed > 0:
+        net = squads_returned - squads_eliminated
+        return_rate = max(-1.0, min(1.0, net / squads_deployed))
+    else:
+        return_rate = 0.0
+    price_signal = max(-1.0, min(1.0, price_change_pct / PRICE_CHANGE_NORM))
+    this_week = 0.5 * price_signal + 0.5 * return_rate
+    posture.momentum = (1.0 - MOMENTUM_EMA_ALPHA) * posture.momentum + MOMENTUM_EMA_ALPHA * this_week
+    posture.momentum = max(-1.0, min(1.0, posture.momentum))
+
+    # Risk appetite — slow accumulator. Asymmetric: wipes 4× baseline, sweeps 2×.
+    if squads_deployed == 0:
+        pass  # sat out the week, no signal
+    elif squads_eliminated == squads_deployed and squads_eliminated > 0:
+        # Total wipe — trauma
+        posture.risk_appetite -= RISK_APPETITE_WIPE_PENALTY
+    elif squads_eliminated == 0 and squads_returned == squads_deployed:
+        # Clean sweep — hot streak
+        posture.risk_appetite += RISK_APPETITE_SWEEP_BONUS
+    else:
+        # Mixed week — drift based on net return rate sign
+        direction = 1.0 if return_rate >= 0 else -1.0
+        posture.risk_appetite += RISK_APPETITE_STEP * direction
+    posture.risk_appetite = max(-1.0, min(1.0, posture.risk_appetite))
+
+    posture.weeks_observed += 1
+
+
+def posture_to_health(posture: PostureState) -> Health:
+    """Bucket the continuous posture into the legacy Health enum.
+
+    Used for display/UI code that still reads the three-state label. Decision
+    logic should NOT route through this — read posture's continuous axes
+    directly to preserve gradient response.
+    """
+    score = 0.5 * posture.momentum + 0.5 * posture.risk_appetite
+    if score >= POSTURE_HEALTH_THRIVE_AT:
+        return "thriving"
+    if score <= POSTURE_HEALTH_STRUGGLE_AT:
+        return "struggling"
+    return "neutral"
+
+
+# ---------------------------------------------------------------------------
 # VOLUNTARY DROPS
 # ---------------------------------------------------------------------------
 def decide_voluntary_drops(
     company,
     roster: CompanyRoster,
-    health: Health,
+    posture: PostureState,
 ) -> list[Runner]:
-    """Struggling companies dump runners whose upkeep is > 2× roster median.
+    """Drop expensive runners as a function of posture.
 
-    Thriving and neutral companies don't drop anyone voluntarily — they prefer
-    to keep talent and let the market take its course. Returns the runners to
-    orphan (also removed from roster.runners in-place).
+    Continuous behaviour:
+      - threshold_multiplier = 2.5 + 1.5 × risk_appetite
+        → 1.0× at risk=-1 (aggressive cuts when conservative), 4.0× at risk=+1 (basically never)
+      - Skip the drop pass entirely when momentum and risk are both ≥ -0.1
+        — a company that isn't hurting and isn't conservative keeps everyone.
+
+    The runner mutation (removing drops from roster.runners) is in place.
     """
-    if health != "struggling" or not roster.runners:
+    if not roster.runners:
+        return []
+    # Companies that aren't hurting AND aren't conservative don't churn.
+    if posture.momentum > -0.1 and posture.risk_appetite > -0.1:
         return []
 
     upkeeps = [r.upkeep_cost for r in roster.runners]
     median = statistics.median(upkeeps)
-    threshold = 2.0 * median
+    threshold_multiplier = 2.5 + 1.5 * posture.risk_appetite
+    threshold = threshold_multiplier * median
     drops = [r for r in roster.runners if r.upkeep_cost > threshold]
     roster.runners = [r for r in roster.runners if r not in drops]
     return drops
@@ -257,14 +463,18 @@ def decide_acquisitions(
     company,
     roster: CompanyRoster,
     free_agents: list[Runner],
-    health: Health,
+    posture: PostureState,
     max_slots: int,
 ) -> list[tuple[Runner, float]]:
-    """Return a ranked list of (runner, bid_amount) up to max_slots entries.
+    """Return a ranked list of (runner, bid_amount), driven by continuous posture.
 
-    The list is the company's preference order; the bidding resolver walks
-    it from top to bottom, picking the first runner not yet claimed by a
-    higher-priority bidder this round.
+    Three knobs scale with posture:
+      - spend_multiplier   = 1.0 + 0.5 × max(risk + momentum, 0)
+          → 1.0× when defensive/neutral, up to 2.0× when aggressive AND on a hot streak.
+      - upkeep_cap_mult    = 1.1 + 0.6 × (risk + 1)
+          → 1.1× median (defensive: only cheap rookies) up to 2.3× median (aggressive: chase veterans).
+      - shell-preference blend: safe_w = 0.5×(1−risk), aggr_w = 0.5×(1+risk).
+          → defensive companies prefer Recon/Triage affinity; aggressive prefer Destroyer/Assassin.
     """
     if max_slots <= 0 or not free_agents:
         return []
@@ -273,20 +483,35 @@ def decide_acquisitions(
     for r in free_agents:
         refresh_upkeep(r)
 
-    if health == "struggling":
-        cap = max(1.0, 1.1 * _roster_median_upkeep(roster) or 1.1 * BASE_UPKEEP)
+    risk = posture.risk_appetite
+    mood = posture.momentum
+
+    spend_multiplier = 1.0 + 0.5 * max(risk + mood, 0.0)
+    upkeep_cap_mult = 1.1 + 0.6 * (risk + 1.0)
+
+    median_upkeep = _roster_median_upkeep(roster)
+
+    safe_w = 0.5 * (1.0 - risk)
+    aggr_w = 0.5 * (1.0 + risk)
+
+    def preference_score(r: Runner) -> float:
+        return safe_w * _safe_shell_score(r) + aggr_w * _aggressive_shell_score(r)
+
+    # Upkeep cap only applies when the roster has a real reference. With an
+    # empty roster the company has no anchor and shouldn't filter — desperate
+    # empty companies need to build up regardless of posture.
+    if median_upkeep > 0:
+        cap = max(1.0, upkeep_cap_mult * median_upkeep)
         eligible = [r for r in free_agents if r.upkeep_cost <= cap]
-        eligible.sort(key=lambda r: (-_safe_shell_score(r), r.upkeep_cost))
-        return [(r, r.upkeep_cost) for r in eligible[:max_slots]]
+        if not eligible:
+            # Defensive fallback: nothing in range, take the cheapest anyway.
+            eligible = sorted(free_agents, key=lambda r: r.upkeep_cost)[:max_slots]
+    else:
+        eligible = list(free_agents)
 
-    if health == "thriving":
-        eligible = [r for r in free_agents if _max_affinity(r) > 0.4] or list(free_agents)
-        eligible.sort(key=lambda r: (-_aggressive_shell_score(r), -_max_affinity(r), r.upkeep_cost))
-        return [(r, 1.5 * r.upkeep_cost) for r in eligible[:max_slots]]
-
-    # neutral — cheapest available at min legal bid
-    eligible = sorted(free_agents, key=lambda r: r.upkeep_cost)
-    return [(r, r.upkeep_cost) for r in eligible[:max_slots]]
+    # Sort by: highest preference (mix of safe + aggressive by risk), then cheapest.
+    eligible.sort(key=lambda r: (-preference_score(r), r.upkeep_cost))
+    return [(r, spend_multiplier * r.upkeep_cost) for r in eligible[:max_slots]]
 
 
 # ---------------------------------------------------------------------------

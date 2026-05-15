@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from runner_sim.market.calibration import bootstrap_default_state
-from runner_sim.market.company_strategy import CompanyRosterEvents
+from runner_sim.market.company_strategy import CompanyRosterEvents, Loan, PostureState
 from runner_sim.market.pricing import CompanyWeekResult
 from runner_sim.market.roster import all_runners as roster_all_runners
 from runner_sim.market.week import simulate_week
@@ -65,6 +65,8 @@ class Company:
     budget: float = 0.0                            # weekly spending pot for upkeep + bids
     valuation: float = STARTING_VALUATION          # enterprise value, updated only on quarterly reports
     pending_valuation_delta: float = 0.0           # accumulates between quarters; reset on report
+    posture: PostureState = field(default_factory=PostureState)  # strategic posture (momentum + risk_appetite)
+    loans: list[Loan] = field(default_factory=list)  # emergency-financing history (outstanding + repaid)
 
 
 @dataclass
@@ -246,6 +248,9 @@ def valuation_delta_for_event(event_kind: str, **context) -> float:
       "squad_eliminated"    context: (none)
       "runner_orphaned"     context: (none)
       "runner_signed"       context: (none)
+      "week_inactive"       context: (none)   — company sat out (roster < 6)
+      "loan_overdue"        context: (none)   — outstanding loan past quarterly mark
+      "loan_repaid"         context: (none)   — outstanding loan settled
     """
     if event_kind == "player_buy":
         # Each share purchased posts +1 to the reputation ledger — buying is a
@@ -266,6 +271,16 @@ def valuation_delta_for_event(event_kind: str, **context) -> float:
     if event_kind == "runner_signed":
         # Modest positive — winning a free-agent draft signals confidence.
         return +1
+    if event_kind == "week_inactive":
+        # Sat out the week — same magnitude as orphaning. "We didn't show up."
+        return -2
+    if event_kind == "loan_overdue":
+        # An outstanding loan crossed its quarterly deadline. Compounds each
+        # quarter it remains unpaid — debt rots reputation steadily.
+        return -5
+    if event_kind == "loan_repaid":
+        # Creditworthiness restored. One-time reward when a loan settles.
+        return +3
     return 0
 
 
@@ -426,6 +441,7 @@ class GameEngine:
             id_supplier=self._id_supplier,
             price_histories=s.price_history,
             anchor_inputs=anchor_inputs,
+            current_week=s.week,
         )
 
         for r in sim_result.company_results:
@@ -479,7 +495,12 @@ class GameEngine:
             for _ in range(r.squads_eliminated):
                 delta = valuation_delta_for_event("squad_eliminated")
                 accrue_valuation(company, delta, reason="squad_eliminated")
-            # Roster events (orphans, drops, signings)
+            # Sat out the week (roster < 6, no squads fielded) — public failure
+            # signal. Fires once per inactive week per company.
+            if r.squads_deployed == 0:
+                delta = valuation_delta_for_event("week_inactive")
+                accrue_valuation(company, delta, reason="week_inactive")
+            # Roster events (orphans, drops, signings, loan settlements)
             ev = sim_result.roster_events.get(company.name)
             if ev is not None:
                 for _ in ev.orphaned_unaffordable:
@@ -488,13 +509,26 @@ class GameEngine:
                 for _ in ev.signed:
                     delta = valuation_delta_for_event("runner_signed")
                     accrue_valuation(company, delta, reason="runner_signed")
+                for _ in range(ev.loans_repaid):
+                    delta = valuation_delta_for_event("loan_repaid")
+                    accrue_valuation(company, delta, reason="loan_repaid")
 
         # ── Quarterly report: convert accumulated counter score into cr ──
-        # Fires on weeks 12, 24, 36, ... The pending counter score is
-        # multiplied by VALUATION_CR_PER_COUNTER to produce the actual cr
-        # movement. Valuation cannot go below 0 (a "bankrupt-reputation" floor).
+        # Fires on weeks 12, 24, 36, ... Before converting, scan each company's
+        # outstanding loans and fire loan_overdue events for any that have
+        # crossed the quarterly mark — these compound (a loan unpaid for 2
+        # quarters fires the penalty at both ticks).
+        # Then the standard quarterly conversion: pending score × cr_per_counter.
         s.last_quarterly_reports = None
         if s.week % QUARTERLY_REPORT_WEEKS == 0:
+            # Scan loans first so overdue penalties land in this quarter's report.
+            from runner_sim.market.company_strategy import overdue_loans
+            for company in s.companies:
+                overdue = overdue_loans(company.loans, current_week=s.week)
+                for _ in overdue:
+                    delta = valuation_delta_for_event("loan_overdue")
+                    accrue_valuation(company, delta, reason="loan_overdue")
+
             reports: dict[str, tuple[float, float, float]] = {}
             for company in s.companies:
                 before = company.valuation

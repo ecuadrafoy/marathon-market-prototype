@@ -86,3 +86,130 @@ class TestAssignSquads:
         result = assign_squads(roster, ZONES)
         for squad in result.values():
             assert "TestCo" in squad.name
+
+
+# ---------------------------------------------------------------------------
+# Posture-driven deployment (composition + zone matching)
+# ---------------------------------------------------------------------------
+# These tests exercise the new posture-aware path; passing posture=None
+# preserves the legacy id-sort + random shuffle behaviour above.
+from runner_sim.market.company_strategy import PostureState
+from runner_sim.zone_sim.extraction_ai import Doctrine, SHELL_DOCTRINE
+import random
+
+
+def _stamp_shell(roster, shell_assignments: list[str]):
+    """Forcibly set each runner's current_shell so we can build deterministic
+    doctrine compositions in tests."""
+    for r, shell in zip(roster.runners, shell_assignments):
+        r.current_shell = shell
+
+
+class TestPostureDeployment:
+    def _make_roster(self, size: int = STARTING_ROSTER_SIZE):
+        market = make_initial_market()
+        used: set[str] = set()
+        roster = create_roster("TestCo", market, used)
+        if size != STARTING_ROSTER_SIZE:
+            roster.runners = roster.runners[:size]
+        return roster
+
+    def test_doctrine_clustering_groups_same_doctrine_shells(self):
+        """3 Destroyers + 3 Recons + 3 Triages should produce exactly one
+        GREEDY squad, one CAUTIOUS squad, one SUPPORT squad — not three
+        mongrel chunks. This is the headline composition fix."""
+        roster = self._make_roster(size=9)
+        _stamp_shell(roster, [
+            "Destroyer", "Destroyer", "Destroyer",
+            "Recon", "Recon", "Recon",
+            "Triage", "Triage", "Triage",
+        ])
+        rng = random.Random(0)
+        result = assign_squads(roster, ZONES, posture=PostureState(), rng=rng)
+
+        doctrines = {sq.doctrine for sq in result.values()}
+        assert Doctrine.GREEDY in doctrines
+        assert Doctrine.CAUTIOUS in doctrines
+        assert Doctrine.SUPPORT in doctrines
+
+    def test_neutral_posture_with_seeded_rng_is_deterministic(self):
+        """Neutral posture still produces variety via the jitter, but with a
+        seeded RNG the result should be reproducible run-to-run."""
+        roster = self._make_roster(size=9)
+        result_a = assign_squads(roster, ZONES, posture=PostureState(),
+                                 rng=random.Random(123))
+        result_b = assign_squads(roster, ZONES, posture=PostureState(),
+                                 rng=random.Random(123))
+        assert {z: sq.doctrine for z, sq in result_a.items()} == \
+               {z: sq.doctrine for z, sq in result_b.items()}
+
+    def test_defensive_posture_pulls_cautious_into_perimeter(self):
+        """A risk_appetite=-0.8 company values safe zones; a CAUTIOUS squad
+        (Recon/Thief) should land in Perimeter most reliably."""
+        roster = self._make_roster(size=9)
+        _stamp_shell(roster, [
+            "Destroyer", "Destroyer", "Destroyer",   # GREEDY
+            "Recon", "Recon", "Recon",                # CAUTIOUS
+            "Vandal", "Vandal", "Vandal",             # BALANCED
+        ])
+        # Aggregate across multiple seeds to get a statistical signal
+        # (the small jitter can flip individual runs).
+        cautious_in_perimeter = 0
+        for seed in range(20):
+            result = assign_squads(roster, ZONES,
+                                   posture=PostureState(risk_appetite=-0.8),
+                                   rng=random.Random(seed))
+            perimeter_squad = result.get("Perimeter")
+            if perimeter_squad and perimeter_squad.doctrine == Doctrine.CAUTIOUS:
+                cautious_in_perimeter += 1
+        # With safety bias +0.3 for Perimeter and risk -0.8, anchor pull is
+        # +0.24 — should dominate jitter (max +0.05) and most base differences.
+        assert cautious_in_perimeter >= 15  # ≥75% of 20 seeds
+
+    def test_aggressive_posture_pulls_greedy_into_outpost(self):
+        """A risk_appetite=+0.8 company gambles GREEDY in Outpost."""
+        roster = self._make_roster(size=9)
+        _stamp_shell(roster, [
+            "Destroyer", "Destroyer", "Destroyer",   # GREEDY
+            "Recon", "Recon", "Recon",                # CAUTIOUS
+            "Vandal", "Vandal", "Vandal",             # BALANCED
+        ])
+        greedy_in_outpost = 0
+        for seed in range(20):
+            result = assign_squads(roster, ZONES,
+                                   posture=PostureState(risk_appetite=+0.8),
+                                   rng=random.Random(seed))
+            outpost_squad = result.get("Outpost")
+            if outpost_squad and outpost_squad.doctrine == Doctrine.GREEDY:
+                greedy_in_outpost += 1
+        assert greedy_in_outpost >= 15
+
+    def test_six_runner_aggressive_skips_perimeter(self):
+        """An aggressive 6-runner roster naturally leaves Perimeter unfielded —
+        the safest zone is least appealing when you're gambling for variance."""
+        roster = self._make_roster(size=6)
+        # Build two GREEDY-ish chunks so both squads dislike Perimeter equally
+        _stamp_shell(roster, ["Destroyer"] * 6)
+        skipped_perimeter = 0
+        for seed in range(20):
+            result = assign_squads(roster, ZONES,
+                                   posture=PostureState(risk_appetite=+0.8),
+                                   rng=random.Random(seed))
+            if "Perimeter" not in result:
+                skipped_perimeter += 1
+        # Aggressive 6-runner rosters should skip Perimeter the majority of the time
+        assert skipped_perimeter >= 12  # ≥60% of 20 seeds
+
+    def test_posture_none_uses_legacy_path(self):
+        """posture=None must preserve the legacy id-sort behaviour for
+        calibration-mode compatibility — runner IDs in chunks match what
+        sort-by-id would produce."""
+        roster = self._make_roster(size=9)
+        result = assign_squads(roster, ZONES, posture=None,
+                               rng=random.Random(7))
+        all_deployed_ids = sorted(
+            r.id for squad in result.values() for r in squad.runners
+        )
+        assert all_deployed_ids == sorted(r.id for r in roster.runners)
+        # All 3 zones get a squad
+        assert len(result) == 3

@@ -4,7 +4,7 @@
 credit flow in the simulation, and how they interlink. Whenever a formula,
 constant, or money path changes, update this file in the same commit.
 
-Last verified against the code: `valuation-anchored-pricing` branch (off `ai-companies`).
+Last verified against the code: `deployment-and-posture` branch (off `ai-companies`).
 
 ---
 
@@ -17,7 +17,7 @@ its own driver, and its own "memory" behaviour:
 |---|---|---|---|---|
 | **Loot credits** | `Squad.loot` | per zone-run | items extracted from zone pools | no (regenerated each week) |
 | **Stock price** | `Company.price` | weekly | performance vs. baseline **+ valuation-anchored mean reversion** | **yes** (`price × (1+pct)`) |
-| **Operating budget** | `Company.budget` | weekly | 30% of extraction credits − payroll − bids + player buys | **yes** (running balance) |
+| **Operating budget** | `Company.budget` | weekly | 30% of extraction credits − payroll − bids + player buys ± loans | **yes** (running balance) |
 | **Valuation** | `Company.valuation` | every 12 weeks | accumulated event "counter score" | **yes** (released quarterly) |
 | **Shell price** | `ShellMarket.prices` | weekly | adoption share across all rosters | **no** (recomputed from scratch) |
 | **Runner wallet** | `Runner.credit_balance` | weekly | extraction share − shell purchases | **yes** (running balance) |
@@ -255,6 +255,9 @@ the report.
 | `squad_eliminated` | `−3` | asymmetric — wipes hurt more than wins help |
 | `runner_orphaned` | `−2` | public signal of financial distress |
 | `runner_signed` | `+1` | successful talent acquisition |
+| `week_inactive` | `−2` | sat-out (roster<6) — "we didn't show up." Mirrors the orphan penalty so a stuck company visibly decays in valuation rather than freezing. |
+| `loan_repaid` | `+3` | creditworthiness restored. One-time bonus when an outstanding loan settles. |
+| `loan_overdue` | `−5` | outstanding loan past its quarterly term — fires at *each* quarterly tick the loan remains unpaid, so debt rots reputation steadily (compounding). |
 
 ### The quarterly report
 
@@ -276,6 +279,66 @@ counter weights, and the single global `VALUATION_CR_PER_COUNTER` scale knob.
 The sell-side budget coupling is deliberately inert (`PLAYER_SELL_CLAWBACK_RATIO`
 = 0.0) — selling damages valuation but not budget. See
 `docs/future_design.md` → "Valuation: Sell-Side Economic Coupling".
+
+---
+
+## 6b. Loans — emergency financing for the death-spiral
+
+**File:** `runner_sim/market/company_strategy.py` (`Loan` dataclass,
+`take_loan_if_needed`, `auto_repay_loan`, `overdue_loans`) · **Cadence:**
+weekly take/repay, quarterly overdue scan.
+
+Companies that bleed budget can take an emergency `1500cr` loan to keep
+operating. The loan keeps them in the game short-term; if not repaid
+within a quarter it starts compounding a valuation penalty.
+
+### When a company takes a loan
+
+`take_loan_if_needed` fires automatically at the end of the AI cycle when
+**all three** conditions hold:
+- `budget < LOAN_TRIGGER_BUDGET_THRESHOLD` (500 cr)
+- Roster `<` `MIN_ROSTER_FOR_DEPLOYMENT` (6) — i.e. company would sit out next week
+- Outstanding loans `<` `MAX_OUTSTANDING_LOANS` (3)
+
+Effect: budget += 1500, new `Loan` appended with `week_taken = current_week`.
+
+### When a company repays
+
+`auto_repay_loan` runs in the same AI-cycle phase. When the company's
+budget rises above `LOAN_REPAY_BUDGET_THRESHOLD` (3000 cr) and at least
+one loan is outstanding, it pays off the **oldest outstanding loan**
+(FIFO): budget -= 1500, loan flagged `repaid`. Fires a `loan_repaid`
+valuation event (+3 score, one-time).
+
+### The compounding overdue penalty
+
+At each quarterly tick (weeks 12, 24, 36, ...), `advance_week` scans each
+company's loans. For every outstanding loan with `(current_week −
+week_taken) >= LOAN_TERM_WEEKS` (12), a `loan_overdue` event fires
+(-5 score). A loan stuck for two quarters fires the penalty at *both*
+ticks, naturally compounding pain.
+
+### The composite incentive
+
+Loans encode the strategic tension: emergency liquidity that's *cheap if
+repaid quickly* but *very expensive if you can't*. A company that loans
+up, recovers, and pays back the loan within a quarter pockets a small
+reputation bonus (+3 score). A company that takes 3 loans and can't
+repay any sees them all fire `-5` at every subsequent quarterly tick —
+a `-15` score per quarter that quietly demolishes valuation over a
+sustained downturn.
+
+### Limitations (and why AI investors are the long-term fix)
+
+The loan system buys ~15-20 weeks of additional survival per loan, but
+companies eventually cap at 3 outstanding loans and run out of options.
+Empirical 50-week runs show roughly 1-in-4 companies survive long-term;
+the rest hit the loan cap and decay. The structural deficit (extraction
+income < upkeep + bidding outflow) remains unfixed. See
+`docs/future_design.md` → "AI Investor Crowd" for the planned
+architectural solution — AI value-buyers that recapitalise
+under-priced companies, providing distributed capital that the loan
+system can't.
 
 ---
 
@@ -563,9 +626,21 @@ Every tunable, its current value, and its home. **Keep this table in sync.**
 | `ORPHAN_RETIRE_AFTER_WEEKS` | 8 | idle weeks before a free agent retires |
 | `MIN_GLOBAL_POOL` | 42 | global runner-count floor; rookies spawn below it |
 | `INITIAL_FREE_AGENT_BENCH` | 8 | free agents seeded at bootstrap |
-| `STRUGGLE_MA_WINDOW` | 3 | weeks of price history for the health signal |
-| `STRUGGLE_THRESHOLD` | 0.97 | price/MA below this → "struggling" |
-| `THRIVE_THRESHOLD` | 1.03 | price/MA above this → "thriving" |
+| `STRUGGLE_MA_WINDOW` | 3 | weeks of price history for the legacy health signal |
+| `STRUGGLE_THRESHOLD` | 0.97 | price/MA below this → "struggling" (legacy) |
+| `THRIVE_THRESHOLD` | 1.03 | price/MA above this → "thriving" (legacy) |
+| **`MOMENTUM_EMA_ALPHA`** | **0.3** | weight on this-week signal in momentum EMA (half-life ~2 weeks) |
+| **`RISK_APPETITE_STEP`** | **0.02** | nominal per-week drift on a mixed week |
+| **`RISK_APPETITE_WIPE_PENALTY`** | **0.08** | all-squads-eliminated trauma (4× baseline) |
+| **`RISK_APPETITE_SWEEP_BONUS`** | **0.04** | all-squads-extracted hot streak (2× baseline) |
+| **`PRICE_CHANGE_NORM`** | **5.0** | divides price_change_pct to normalize into ~[-1, +1] |
+| **`POSTURE_HEALTH_THRIVE_AT`** | **0.25** | posture-derived Health bucket threshold |
+| **`POSTURE_HEALTH_STRUGGLE_AT`** | **-0.25** | posture-derived Health bucket threshold |
+| **`LOAN_AMOUNT`** | **1500.0** | principal of each emergency loan |
+| **`LOAN_TERM_WEEKS`** | **12** | quarterly term — unpaid loans accrue penalty per quarterly tick beyond this |
+| **`LOAN_TRIGGER_BUDGET_THRESHOLD`** | **500.0** | budget below this + roster<6 → auto-take a loan |
+| **`LOAN_REPAY_BUDGET_THRESHOLD`** | **3000.0** | budget above this → auto-repay oldest loan |
+| **`MAX_OUTSTANDING_LOANS`** | **3** | hard cap on stacked debt per company |
 
 ### `runner_sim/market/roster.py` / `deployment.py`
 | Constant | Value | Meaning |

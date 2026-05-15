@@ -47,15 +47,18 @@ from runner_sim.market.roster import (
 )
 from runner_sim.market.company_strategy import (
     CompanyRosterEvents,
+    PostureState,
     RunnerIdCounter,
+    auto_repay_loan,
     collect_company_income,
     decide_acquisitions,
     decide_voluntary_drops,
-    company_health,
     release_to_free_agents,
     resolve_bidding,
     settle_payroll,
+    take_loan_if_needed,
     tick_free_agent_pool,
+    update_posture,
 )
 from runner_sim.market.shell_market import ShellMarket, update_prices, reequip_survivors
 from runner_sim.zone_sim.items import Item
@@ -328,6 +331,7 @@ def simulate_week(
     price_histories: dict[str, list[float]] | None = None,
     rng: random.Random | None = None,
     anchor_inputs: dict[str, tuple[float, float, float]] | None = None,
+    current_week: int = 0,
 ) -> WeekSimulationResult:
     """Run one full week of the integrated simulation.
 
@@ -377,13 +381,22 @@ def simulate_week(
     # This is the "deploy what you have" phase: AI doesn't make headcount
     # decisions until AFTER it sees this week's outcome (post-deployment).
     from runner_sim.market.deployment import MIN_ROSTER_FOR_DEPLOYMENT
+
+    # Build a name → Company lookup so we can thread posture into assign_squads.
+    # In calibration mode (ai_enabled=False) companies is None → posture stays
+    # None and deployment falls back to legacy id-sort + random shuffle.
+    company_by_name: dict[str, object] = {}
+    if ai_enabled:
+        company_by_name = {c.name: c for c in companies}
+
     deployments: dict[str, list[tuple[str, Squad]]] = {z.name: [] for z in zones}
     co_squads_by_company: dict[str, dict[str, Squad]] = {}
     for company_name, roster in rosters.items():
         if len(roster.runners) < MIN_ROSTER_FOR_DEPLOYMENT:
             co_squads_by_company[company_name] = {}
             continue
-        zone_to_squad = assign_squads(roster, zones)
+        posture = company_by_name[company_name].posture if ai_enabled else None
+        zone_to_squad = assign_squads(roster, zones, posture=posture, rng=rng)
         co_squads_by_company[company_name] = zone_to_squad
         for zone_name, squad in zone_to_squad.items():
             deployments[zone_name].append((company_name, squad))
@@ -457,12 +470,11 @@ def simulate_week(
                 roster_events[company.name].orphaned_unaffordable.append(r.name)
                 release_to_free_agents(r, free_agents)
 
-        # 6c. Voluntary drops — struggling companies dump expensive runners
-        # to make room for cheaper rookies next week.
+        # 6c. Voluntary drops — driven by company posture (continuous).
+        # Conservative postures cull more aggressively when momentum is bad;
+        # neutral/positive postures keep everyone.
         for company in companies:
-            history = (price_histories or {}).get(company.name, [])
-            health = company_health(history)
-            drops = decide_voluntary_drops(company, rosters[company.name], health)
+            drops = decide_voluntary_drops(company, rosters[company.name], company.posture)
             for r in drops:
                 roster_events[company.name].voluntarily_dropped.append(r.name)
                 release_to_free_agents(r, free_agents)
@@ -480,14 +492,13 @@ def simulate_week(
         )
 
         # 6e. Bidding draft — each company signs from the FA pool to refill.
+        # Posture drives bid amount, upkeep cap, and shell-preference blend.
         bids_by_company: dict[str, list[tuple]] = {}
         for company in companies:
-            history = (price_histories or {}).get(company.name, [])
-            health = company_health(history)
             roster = rosters[company.name]
             slots_needed = 9 - len(roster.runners)
             bids_by_company[company.name] = decide_acquisitions(
-                company, roster, free_agents, health, slots_needed
+                company, roster, free_agents, company.posture, slots_needed
             )
         signed = resolve_bidding(
             companies=companies,
@@ -510,6 +521,36 @@ def simulate_week(
                     shell = choose_affordable_shell(r, market.prices, r.credit_balance)
                     r.current_shell = shell.name
                     r.credit_balance = max(r.credit_balance - market.prices[shell.name], 0.0)
+
+        # 6f.5. Loan flow — repay first (free up the slot for emergencies), then
+        # take a new loan if the company is about to sit out broke. Both fire
+        # roster_events counters that advance_week will translate into valuation
+        # accrual (loan_repaid → +3 score, loan_overdue → -5 at quarterly tick).
+        for company in companies:
+            repaid = auto_repay_loan(company, current_week=current_week)
+            if repaid is not None:
+                roster_events[company.name].loans_repaid += 1
+            taken = take_loan_if_needed(
+                company,
+                rosters[company.name],
+                current_week=current_week,
+            )
+            if taken is not None:
+                roster_events[company.name].loans_taken += 1
+
+        # 6g. Posture update — reflects this week's outcome, ready for next
+        # week's deployment + decisions. Done LAST in the AI cycle so future
+        # events firing between weeks can mutate posture before next deploy
+        # reads it. Each company reads its own CompanyWeekResult.
+        for company in companies:
+            r = next(res for res in results if res.company_name == company.name)
+            update_posture(
+                posture=company.posture,
+                price_change_pct=r.price_change_pct,
+                squads_deployed=r.squads_deployed,
+                squads_returned=r.squads_returned,
+                squads_eliminated=r.squads_eliminated,
+            )
 
     # --- 7. Weekly re-equip: surviving runners upgrade to best affordable shell ---
     reequip_survivors(all_runners(rosters), market)

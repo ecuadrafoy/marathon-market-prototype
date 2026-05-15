@@ -331,6 +331,39 @@ The plumbing is in place; what's needed is *agents*, not new pipes:
 - Reading AI sentiment becomes a new layer of gameplay: front-run, fade, or
   follow.
 
+### The concrete economic gap this is meant to fill
+
+The loan system added on the `deployment-and-posture` branch is a
+**short-term lifeline** — it buys broke companies ~15-20 weeks of survival
+through emergency financing — but it doesn't break the underlying death
+spiral. Empirical 50-week runs show:
+
+- Average company P&L runs at a small but *consistent* deficit:
+  ~30% of extraction credits as income vs. ~115% of that as upkeep + bidding
+  outflow. The system is roughly -12 cr/week net per company on average.
+- Loans extend survival by adding 3 × 1500cr = 4500cr emergency capital,
+  but companies cap at `MAX_OUTSTANDING_LOANS = 3` and eventually die when
+  no further borrowing is possible.
+- Compounding `loan_overdue` + `week_inactive` valuation penalties make
+  stuck companies *visibly* decay (CyberAcme: valuation 5000 → 3180 over
+  weeks 36-48), but don't generate new income.
+
+The 1-in-4 survival rate at 50 weeks is a defensible *game-design* outcome
+(player picks winners), but if you want long-running games (100+ weeks)
+or want most companies to be viable backdrops to gameplay, **AI investors
+are the structural fix**. They would inject "smart money" capital into
+under-priced companies — exactly when price gaps the valuation anchor and
+fair_value diverge meaningfully, AI value-buyers should fill the gap,
+recapitalising the company's budget.
+
+The mechanism should target this specific signal: **AI value-buyers
+purchase shares when `price < fair_value × discount_threshold`**, where
+fair_value is the existing anchor-derived target. Their buys fire the
+existing `do_buy` path → budget injection → company can make payroll →
+roster rebuilds. The loan system + AI investors compose cleanly: loans
+handle short-term cashflow gaps, AI investors handle structural
+under-capitalisation.
+
 ---
 
 ## Valuation: Sell-Side Economic Coupling

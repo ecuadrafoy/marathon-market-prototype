@@ -383,12 +383,15 @@ class TestRosterEconomyEndToEnd:
         from runner_sim.market.week import simulate_week
         from runner_sim.zone_sim.items import load_items
         from runner_sim.zone_sim.zones import ZONES
+        from runner_sim.market.company_strategy import Loan, PostureState
 
         @dataclass
         class StubCompany:
             name: str
             price: float
             budget: float = 600.0
+            posture: PostureState = field(default_factory=PostureState)
+            loans: list[Loan] = field(default_factory=list)
 
         random.seed(2026)
         rosters, market, free_agents, id_supplier = bootstrap_default_state()
@@ -452,19 +455,22 @@ class TestRosterEconomyEndToEnd:
         """simulate_week returns a CompanyRosterEvents per company, even when
         no transitions happened. Across a 10-week run we should see signings,
         deaths, and orphan/drop events somewhere in the stream."""
-        from dataclasses import dataclass
+        from dataclasses import dataclass, field
         import random
         from runner_sim.market.calibration import bootstrap_default_state
         from runner_sim.market.company_strategy import CompanyRosterEvents
         from runner_sim.market.week import simulate_week
         from runner_sim.zone_sim.items import load_items
         from runner_sim.zone_sim.zones import ZONES
+        from runner_sim.market.company_strategy import Loan, PostureState
 
         @dataclass
         class StubCo:
             name: str
             price: float
             budget: float = 600.0
+            posture: PostureState = field(default_factory=PostureState)
+            loans: list[Loan] = field(default_factory=list)
 
         random.seed(7)
         rosters, market, free_agents, id_supplier = bootstrap_default_state()
@@ -477,7 +483,7 @@ class TestRosterEconomyEndToEnd:
         item_catalog = load_items()
         price_histories = {c.name: [c.price] for c in companies}
 
-        saw_signed = saw_died = saw_orphaned = False
+        saw_signed = saw_died = saw_orphaned_or_loaned = False
         rng = random.Random(0)
 
         for _ in range(15):
@@ -494,7 +500,10 @@ class TestRosterEconomyEndToEnd:
                 assert isinstance(ev, CompanyRosterEvents)
                 if ev.signed:                saw_signed = True
                 if ev.died:                  saw_died = True
-                if ev.orphaned_unaffordable: saw_orphaned = True
+                # Loans intervene to prevent some orphan events now — accept either
+                # cause of "financial distress" signal.
+                if ev.orphaned_unaffordable or ev.loans_taken:
+                    saw_orphaned_or_loaned = True
 
             for r in result.company_results:
                 for c in companies:
@@ -502,6 +511,74 @@ class TestRosterEconomyEndToEnd:
                         c.price = r.price_after
                         price_histories[c.name].append(r.price_after)
 
-        assert saw_signed,   "no signings recorded across 15 weeks"
-        assert saw_died,     "no deaths recorded across 15 weeks"
-        assert saw_orphaned, "no orphan-unaffordable events recorded across 15 weeks"
+        assert saw_signed,            "no signings recorded across 15 weeks"
+        assert saw_died,              "no deaths recorded across 15 weeks"
+        assert saw_orphaned_or_loaned, (
+            "no financial-distress signal (neither orphans nor loans) in 15 weeks"
+        )
+
+    def test_posture_drifts_across_24_weeks(self):
+        """End-to-end: drive 24 weeks of normal play and assert that company
+        postures diverge meaningfully — at least one company should have
+        accumulated a non-trivial risk_appetite (in either direction) by
+        the end. Catches regressions in the update_posture wiring."""
+        from dataclasses import dataclass, field
+        import random
+        from runner_sim.market.calibration import bootstrap_default_state
+        from runner_sim.market.company_strategy import Loan, PostureState
+        from runner_sim.market.week import simulate_week
+        from runner_sim.zone_sim.items import load_items
+        from runner_sim.zone_sim.zones import ZONES
+
+        @dataclass
+        class StubCo:
+            name: str
+            price: float
+            budget: float = 600.0
+            posture: PostureState = field(default_factory=PostureState)
+            loans: list[Loan] = field(default_factory=list)
+
+        random.seed(2026)
+        rosters, market, free_agents, id_supplier = bootstrap_default_state()
+        companies = [
+            StubCo("CyberAcme", 450.0),
+            StubCo("Sekiguchi", 380.0),
+            StubCo("Traxus",    300.0),
+            StubCo("NuCaloric", 200.0),
+        ]
+        item_catalog = load_items()
+        price_histories = {c.name: [c.price] for c in companies}
+        rng = random.Random(0)
+
+        # Verify all start neutral
+        for c in companies:
+            assert c.posture.momentum == 0.0
+            assert c.posture.risk_appetite == 0.0
+            assert c.posture.weeks_observed == 0
+
+        for _ in range(24):
+            result = simulate_week(
+                rosters, market, ZONES, item_catalog,
+                company_prices={c.name: c.price for c in companies},
+                companies=companies, free_agents=free_agents,
+                id_supplier=id_supplier, price_histories=price_histories,
+                rng=rng,
+            )
+            for r in result.company_results:
+                for c in companies:
+                    if c.name == r.company_name:
+                        c.price = r.price_after
+                        price_histories[c.name].append(r.price_after)
+
+        # All companies should have observed 24 weeks
+        for c in companies:
+            assert c.posture.weeks_observed == 24
+
+        # At least one company should have measurable risk_appetite divergence.
+        # With asymmetric updates (+0.04 sweep, −0.08 wipe, ±0.02 mixed) over
+        # 24 weeks, the most-extreme company should be ≥0.3 from neutral.
+        max_abs_risk = max(abs(c.posture.risk_appetite) for c in companies)
+        assert max_abs_risk >= 0.3, (
+            f"No company developed a measurable risk_appetite after 24 weeks; "
+            f"max abs risk = {max_abs_risk:.2f}"
+        )

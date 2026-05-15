@@ -20,7 +20,7 @@ simulate_week, used by both the live game and calibration.
 from __future__ import annotations
 import random
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from runner_sim.market.roster import (
     CompanyRoster,
@@ -33,6 +33,8 @@ from runner_sim.market.roster import (
 from runner_sim.market.shell_market import ShellMarket, make_initial_market, update_prices
 from runner_sim.market.company_strategy import (
     INITIAL_FREE_AGENT_BENCH,
+    Loan,
+    PostureState,
     RunnerIdCounter,
 )
 from runner_sim.runners import Runner
@@ -49,15 +51,18 @@ class _CalibCompany:
     """Minimal Company stand-in for headless calibration.
 
     The AI cycle in simulate_week (settle_payroll / decide_acquisitions /
-    resolve_bidding) reads .name / .price / .budget and mutates .budget;
-    valuation fields are present with zero defaults but never touched in
-    calibration mode (no anchor, no quarterly tick fires here).
+    resolve_bidding / take_loan_if_needed) reads .name / .price / .budget /
+    .posture / .loans and mutates .budget + .posture + .loans; valuation
+    fields are present with zero defaults but never touched in calibration
+    mode (no anchor, no quarterly tick fires).
     """
     name: str
     price: float
     budget: float = DEFAULT_STARTING_BUDGET
     valuation: float = 0.0
     pending_valuation_delta: float = 0.0
+    posture: PostureState = field(default_factory=PostureState)
+    loans: list[Loan] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
