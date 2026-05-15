@@ -269,6 +269,99 @@ class TestApplyZoneOutcomeFallback:
 
 
 # ---------------------------------------------------------------------------
+# Valuation anchor — integration with _build_company_result
+# ---------------------------------------------------------------------------
+class TestBuildCompanyResultAnchor:
+    """The anchor term is added on top of the performance term inside
+    _build_company_result. These tests pin down three invariants:
+
+      1. anchor_input=None → anchor contribution is exactly 0 (calibration
+         compatibility).
+      2. price_change_pct decomposes exactly: total = performance + anchor.
+      3. Under identical RNG seed, an undervalued anchor_input produces a
+         higher price_after than an overvalued one — confirming the anchor
+         shifts price in the direction of the projected valuation.
+    """
+
+    def _build(self, *, anchor_input, seed=42, price_before=300.0):
+        """Run _build_company_result in a minimal 'company sat out' scenario.
+
+        co_squads={} and zone_results={} means no deployment — total_credits=0,
+        squads_returned=0, squads_eliminated=0. The performance term is purely
+        the (-baseline + noise) value; the anchor is whatever anchor_input
+        produces. Seeding the RNG identically across calls makes the
+        performance term reproducible so we can isolate the anchor's effect.
+        """
+        import random as _r
+        from runner_sim.market.week import _build_company_result
+
+        _r.seed(seed)
+        return _build_company_result(
+            company_name="TestCo",
+            price_before=price_before,
+            co_squads={},
+            monitored_zone_name="Perimeter",
+            zone_results={},
+            expected_squad_count=3,
+            anchor_input=anchor_input,
+        )
+
+    def test_anchor_input_none_yields_zero_anchor(self):
+        """Calibration-mode compatibility: omitting anchor_input must produce
+        anchor_pull_pct == 0 and price_change_pct == performance_pct exactly."""
+        result = self._build(anchor_input=None)
+        assert result.anchor_pull_pct == 0.0
+        assert result.fair_value == 0.0
+        assert result.price_change_pct == pytest.approx(result.performance_pct, rel=1e-12)
+
+    def test_price_change_decomposes_exactly(self):
+        """price_change_pct must equal performance_pct + anchor_pull_pct,
+        bit-exact (within float epsilon). This is the contract the rest of
+        the UI/test suite relies on."""
+        from runner_sim.market.pricing import STARTING_VALUATION
+        # Drive a non-trivial anchor by passing a valuation 20% above starting.
+        result = self._build(
+            anchor_input=(STARTING_VALUATION * 1.2, 0.0, 300.0),
+        )
+        assert result.price_change_pct == pytest.approx(
+            result.performance_pct + result.anchor_pull_pct, rel=1e-12,
+        )
+        # Sanity: the anchor really did fire (non-zero contribution).
+        assert result.anchor_pull_pct != 0.0
+
+    def test_undervalued_anchor_lifts_price_above_overvalued(self):
+        """Hold the performance term constant via identical RNG seeds; the
+        only difference between the two calls is the anchor sign. The
+        undervalued case (valuation > STARTING) must produce a higher
+        price_after than the overvalued case."""
+        from runner_sim.market.pricing import STARTING_VALUATION
+        undervalued = self._build(
+            anchor_input=(STARTING_VALUATION * 1.2, 0.0, 300.0), seed=7,
+        )
+        overvalued = self._build(
+            anchor_input=(STARTING_VALUATION * 0.8, 0.0, 300.0), seed=7,
+        )
+        assert undervalued.price_after > overvalued.price_after
+        # And the performance term is identical between them — proving the
+        # difference is purely the anchor.
+        assert undervalued.performance_pct == pytest.approx(
+            overvalued.performance_pct, rel=1e-12,
+        )
+
+    def test_anchor_at_starting_valuation_with_price_at_anchor_is_zero_pull(self):
+        """The week-0 condition: projected==STARTING and price_before==anchor_price
+        means fair_value==anchor_price means zero pull. Used to confirm the
+        anchor doesn't bias the system at game start."""
+        from runner_sim.market.pricing import STARTING_VALUATION
+        result = self._build(
+            anchor_input=(STARTING_VALUATION, 0.0, 300.0),
+            price_before=300.0,
+        )
+        assert result.anchor_pull_pct == pytest.approx(0.0, abs=1e-9)
+        assert result.fair_value == pytest.approx(300.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # Integration: closed-pool invariants over a multi-week run
 # ---------------------------------------------------------------------------
 class TestRosterEconomyEndToEnd:

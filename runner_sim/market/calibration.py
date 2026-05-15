@@ -1,18 +1,26 @@
 """
 Headless calibration for the integrated market layer.
 
-Runs simulate_week for many weeks with no UI/no price update, collects
-per-company-week credit totals, and returns mean + stddev. These feed
+Runs simulate_week for many weeks WITH the company-AI loop enabled (so it
+exercises the real variable-roster steady state — orphans, signings, bidding)
+but WITHOUT the valuation anchor (so it measures the pure performance signal).
+Returns mean + stddev of per-company-week credit totals. These feed
 BASE_EXPECTATION and EXPECTED_DELTA_RANGE in pricing.py.
 
+The split is deliberate: the performance term is calibrated under the real
+roster dynamics so the constants match what the live game actually sees,
+but the anchor is layered on additively in `_build_company_result` — leaving
+the calibration meaning intact regardless of how the anchor is tuned.
+
 Also exposes bootstrap_default_state() — a single entry point that
-constructs (rosters, shell market) ready to feed simulate_week, used
-by both the live game and calibration.
+constructs (rosters, shell market, free agents, id counter) ready to feed
+simulate_week, used by both the live game and calibration.
 """
 
 from __future__ import annotations
 import random
 import statistics
+from dataclasses import dataclass
 
 from runner_sim.market.roster import (
     CompanyRoster,
@@ -28,6 +36,28 @@ from runner_sim.market.company_strategy import (
     RunnerIdCounter,
 )
 from runner_sim.runners import Runner
+
+
+# Starting prices mirror marathon_market.GameEngine.__init__ — kept local
+# so calibration doesn't import marathon_market. Order matches DEFAULT_COMPANY_NAMES.
+DEFAULT_STARTING_PRICES: tuple[float, ...] = (450.0, 380.0, 300.0, 200.0)
+DEFAULT_STARTING_BUDGET: float = 600.0   # mirror of marathon_market.STARTING_COMPANY_BUDGET
+
+
+@dataclass
+class _CalibCompany:
+    """Minimal Company stand-in for headless calibration.
+
+    The AI cycle in simulate_week (settle_payroll / decide_acquisitions /
+    resolve_bidding) reads .name / .price / .budget and mutates .budget;
+    valuation fields are present with zero defaults but never touched in
+    calibration mode (no anchor, no quarterly tick fires here).
+    """
+    name: str
+    price: float
+    budget: float = DEFAULT_STARTING_BUDGET
+    valuation: float = 0.0
+    pending_valuation_delta: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -91,39 +121,74 @@ def bootstrap_default_state(
 # ---------------------------------------------------------------------------
 def headless_calibration(weeks: int = 1000, seed: int = 42) -> tuple[float, float]:
     """Run the full integrated stack for many weeks; return (mean, stdev) of
-    per-company-week total credits extracted.
+    per-company-week total credits extracted under live AI dynamics.
 
-    Caller paste:
-      BASE_EXPECTATION = mean / 3       (per-squad expectation)
-      EXPECTED_DELTA_RANGE = stdev      (typical fluctuation magnitude)
+    Caller paste into pricing.py:
+      BASE_EXPECTATION    = mean / 3
+      EXPECTED_DELTA_RANGE = stdev
 
-    Steady-state with drift: rosters persist for the full run; runners
-    that survive specialize naturally. Recruits replace the dead and
-    enter at current shell-market prices.
-
-    Note: simulate_week is implemented in step 4. Until then this raises
-    ImportError when called — leaving the surface in place so step 6
-    can plug in cleanly.
+    Runs with the company-AI loop ACTIVE (budgets, payroll, orphaning, bidding,
+    variable 6–9 rosters) — so the distribution we measure is the real
+    steady-state the live game sees. Runs WITHOUT anchor_inputs, so the
+    `total_credits_extracted` collected here is the pure performance signal,
+    untouched by the valuation mean-reversion term. The two layers stay
+    cleanly separable.
     """
     random.seed(seed)
+    rng = random.Random(seed)
 
     # Local import to avoid loading week.py (and zone_sim) just to import this module.
     from runner_sim.market.week import simulate_week
     from runner_sim.zone_sim.zones import ZONES
     from runner_sim.zone_sim.items import load_items
 
-    rosters, market, _free_agents, _id_supplier = bootstrap_default_state()
+    rosters, market, free_agents, id_supplier = bootstrap_default_state()
     item_catalog = load_items()
+
+    # Stand-in companies — minimal stubs the AI cycle can mutate.
+    companies = [
+        _CalibCompany(name=name, price=price)
+        for name, price in zip(DEFAULT_COMPANY_NAMES, DEFAULT_STARTING_PRICES)
+    ]
+    price_histories: dict[str, list[float]] = {c.name: [c.price] for c in companies}
 
     per_company_credits: list[float] = []
     for _ in range(weeks):
-        # Calibration mode runs simulate_week WITHOUT the company-AI loop
-        # (no companies/free_agents/id_supplier), so deaths vanish into the
-        # void and rosters are not refilled — same behaviour as before, used
-        # only for re-deriving pricing constants.
-        result = simulate_week(rosters, market, ZONES, item_catalog)
-        per_company_credits.extend(r.total_credits_extracted for r in result.company_results)
+        # AI loop ON, anchor OFF — measures the pure performance distribution
+        # under live roster dynamics.
+        result = simulate_week(
+            rosters, market, ZONES, item_catalog,
+            company_prices={c.name: c.price for c in companies},
+            companies=companies,
+            free_agents=free_agents,
+            id_supplier=id_supplier,
+            price_histories=price_histories,
+            rng=rng,
+            # anchor_inputs intentionally omitted → anchor term = 0.0
+        )
+        # Mirror advance_week: write price_after back, update histories.
+        for r in result.company_results:
+            for c in companies:
+                if c.name == r.company_name:
+                    c.price = r.price_after
+                    price_histories[c.name].append(r.price_after)
+        # Calibrate on ACTIVE company-weeks only — i.e. conditional on having
+        # actually deployed. A company that sat out (roster<6 → no squads)
+        # contributes total_credits=0, but the live game still measures it
+        # against the full baseline (3 × BASE_EXPECTATION), so including those
+        # zeros here would double-count the under-deployment penalty and
+        # collapse the mean to near-zero. The performance term is meant to
+        # answer "given that you deployed, what's expected?"
+        per_company_credits.extend(
+            r.total_credits_extracted for r in result.company_results
+            if r.squads_deployed > 0
+        )
 
-    mean = statistics.mean(per_company_credits)
+    # Use MEDIAN, not mean, as the "typical week" reference. Loot is heavily
+    # right-skewed (rare Epics at 1000cr pull the mean up); a mean-based
+    # baseline makes every median-week look like underperformance and produces
+    # systematic price drift down. The median is what a player intuitively
+    # reads as "expected" and keeps the typical week's price move near zero.
+    median = statistics.median(per_company_credits)
     stdev = statistics.stdev(per_company_credits)
-    return mean, stdev
+    return median, stdev

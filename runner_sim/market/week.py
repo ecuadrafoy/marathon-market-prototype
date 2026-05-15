@@ -33,8 +33,10 @@ from runner_sim.encounters import (
 from runner_sim.market.deployment import assign_squads
 from runner_sim.market.pricing import (
     CompanyWeekResult,
+    PRICE_FLOOR,
+    compute_anchor_pull_pct,
     compute_baseline,
-    compute_price_change_pct,
+    compute_total_price_change_pct,
 )
 from runner_sim.market.roster import (
     CompanyRoster,
@@ -206,6 +208,7 @@ def _build_company_result(
     monitored_zone_name: str,
     zone_results: dict[str, ZoneRunResult],
     expected_squad_count: int | None = None,
+    anchor_input: tuple[float, float, float] | None = None,
 ) -> CompanyWeekResult:
     """Aggregate one company's per-zone squad outcomes into a CompanyWeekResult.
 
@@ -216,6 +219,10 @@ def _build_company_result(
     Kill counts come from CombatEvent.loser_runner_count — the authoritative
     per-week source — rather than runner.eliminations, which is a lifetime
     career total and would show cumulative kills across all past weeks.
+
+    anchor_input, when provided, is (valuation, pending_valuation_delta,
+    anchor_price) — it adds the valuation mean-reversion term to the price
+    move. When None (calibration mode), only the performance term applies.
     """
     squads_returned = sum(1 for sq in co_squads.values() if sq.extracted)
     squads_eliminated = sum(1 for sq in co_squads.values() if sq.eliminated)
@@ -258,8 +265,29 @@ def _build_company_result(
     expected = expected_squad_count if expected_squad_count is not None else len(co_squads)
     baseline = compute_baseline(squads_deployed=expected)
     delta = total_credits - baseline
-    pct = compute_price_change_pct(total_credits, baseline)
-    price_after = max(price_before * (1.0 + pct / 100.0), 1.0)  # PRICE_FLOOR=1.0
+
+    # Anchor term — valuation-derived mean reversion. Zero when anchor_input is
+    # absent (calibration mode) so the performance term stands alone, exactly
+    # matching how the constants were calibrated.
+    if anchor_input is not None:
+        valuation, pending_delta, anchor_price = anchor_input
+        anchor_pct = compute_anchor_pull_pct(
+            price_before, valuation, pending_delta, anchor_price,
+        )
+        # Imported lazily-ish: pricing.py owns the constants; recompute fair_value
+        # locally just for surfacing on the result (cheap, no second formula path).
+        from runner_sim.market.pricing import STARTING_VALUATION, VALUATION_CR_PER_COUNTER
+        projected = valuation + pending_delta * VALUATION_CR_PER_COUNTER
+        fair_value = anchor_price * (projected / STARTING_VALUATION)
+    else:
+        anchor_pct = 0.0
+        fair_value = 0.0
+
+    performance_pct = compute_total_price_change_pct(
+        total_credits, baseline, anchor_pull_pct=0.0,
+    )
+    pct = performance_pct + anchor_pct
+    price_after = max(price_before * (1.0 + pct / 100.0), PRICE_FLOOR)
 
     return CompanyWeekResult(
         company_name=company_name,
@@ -271,6 +299,9 @@ def _build_company_result(
         baseline=baseline,
         delta=delta,
         price_change_pct=pct,
+        performance_pct=performance_pct,
+        anchor_pull_pct=anchor_pct,
+        fair_value=fair_value,
         price_before=price_before,
         price_after=price_after,
         monitored_squad_returned=(
@@ -296,6 +327,7 @@ def simulate_week(
     id_supplier: RunnerIdCounter | None = None,
     price_histories: dict[str, list[float]] | None = None,
     rng: random.Random | None = None,
+    anchor_inputs: dict[str, tuple[float, float, float]] | None = None,
 ) -> WeekSimulationResult:
     """Run one full week of the integrated simulation.
 
@@ -318,6 +350,11 @@ def simulate_week(
                          for the struggling/thriving signal).
         rng:             random.Random used for bidding-draft order. Threaded
                          for determinism under seeded tests.
+        anchor_inputs:   optional {company_name: (valuation, pending_delta,
+                         anchor_price)} that activates the valuation-anchored
+                         mean-reversion term in pricing. When None (calibration
+                         mode), the anchor is skipped and only the performance
+                         term applies — matching how the constants were calibrated.
 
     Returns:
         WeekSimulationResult containing the player-facing company_results
@@ -380,6 +417,7 @@ def simulate_week(
             monitored_zone_name=monitored,
             zone_results=zone_results,
             expected_squad_count=len(zones),
+            anchor_input=(anchor_inputs or {}).get(company_name),
         ))
 
     # --- 5. Route dead runners. In AI mode: → free-agent pool (closed-pool model,

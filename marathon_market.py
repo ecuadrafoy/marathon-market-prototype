@@ -46,13 +46,13 @@ PLAYER_SELL_CLAWBACK_RATIO = 0.0
 # weekly on noise) and budget (flows in/out continuously), valuation is
 # REPORTED quarterly. Between reports, events accumulate in
 # Company.pending_valuation_delta and are released at week boundaries that
-# are multiples of QUARTERLY_REPORT_WEEKS.
-STARTING_VALUATION       = 5_000.0
+# are multiples of QUARTERLY_REPORT_WEEKS. STARTING_VALUATION and
+# VALUATION_CR_PER_COUNTER are now owned by runner_sim.market.pricing — the
+# pricing module needs them for the valuation-anchored price formula and
+# pricing.py is imported BY this module, so we re-import them here to keep
+# the public surface stable.
+from runner_sim.market.pricing import STARTING_VALUATION, VALUATION_CR_PER_COUNTER
 QUARTERLY_REPORT_WEEKS   = 12
-# At the quarterly report, the accumulated counter score is converted into
-# actual valuation credits using this factor. One global tuning knob —
-# raise it to make quarterly reports more dramatic, lower it for subtlety.
-VALUATION_CR_PER_COUNTER = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +408,16 @@ class GameEngine:
         s = self.state
         time.sleep(SIM_PAUSE_SECS)
 
+        # Build anchor_inputs so the valuation-anchored price formula in
+        # pricing.py can pull each company's weekly move toward its
+        # fair-value (= starting price scaled by projected_valuation /
+        # STARTING_VALUATION). pending_valuation_delta at this point reflects
+        # events through last week — the intended one-week lag.
+        anchor_inputs = {
+            c.name: (c.valuation, c.pending_valuation_delta, s.price_history[c.name][0])
+            for c in s.companies
+        }
+
         sim_result = simulate_week(
             s.rosters, s.market, ZONES, s.item_catalog,
             company_prices=_prices_dict(s.companies),
@@ -415,6 +425,7 @@ class GameEngine:
             free_agents=s.free_agents,
             id_supplier=self._id_supplier,
             price_histories=s.price_history,
+            anchor_inputs=anchor_inputs,
         )
 
         for r in sim_result.company_results:
