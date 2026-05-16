@@ -80,7 +80,16 @@ POSTURE_HEALTH_STRUGGLE_AT      = -0.25
 LOAN_AMOUNT                     = 1500.0   # principal per loan
 LOAN_TERM_WEEKS                 = 12       # repayment window (= QUARTERLY_REPORT_WEEKS)
 LOAN_TRIGGER_BUDGET_THRESHOLD   = 500.0    # below this AND would sit out → trigger
-LOAN_REPAY_BUDGET_THRESHOLD     = 3000.0   # auto-repay once budget exceeds this
+# Auto-repay the moment budget can cover the principal. Originally set to
+# 3000 but empirical 60-week diagnostics showed peak budgets in this economy
+# rarely exceed 2000cr — at 3000 loans NEVER cycled, just stacked up overdue
+# and inflicted compounding valuation penalties. Setting the threshold equal
+# to LOAN_AMOUNT means "if you can afford to clear a loan, do it." Companies
+# that earn back to 1500cr settle the oldest loan immediately. Side benefit:
+# this generates loan_repaid events (+3 valuation score per cycle) and
+# avoids future loan_overdue events (-5 score per quarter per outstanding
+# loan), so loan cycling becomes a small but real valuation tailwind.
+LOAN_REPAY_BUDGET_THRESHOLD     = LOAN_AMOUNT
 MAX_OUTSTANDING_LOANS           = 3        # hard cap on stacking debt
 
 Health = Literal["thriving", "neutral", "struggling"]

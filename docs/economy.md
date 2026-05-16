@@ -305,10 +305,25 @@ Effect: budget += 1500, new `Loan` appended with `week_taken = current_week`.
 ### When a company repays
 
 `auto_repay_loan` runs in the same AI-cycle phase. When the company's
-budget rises above `LOAN_REPAY_BUDGET_THRESHOLD` (3000 cr) and at least
-one loan is outstanding, it pays off the **oldest outstanding loan**
-(FIFO): budget -= 1500, loan flagged `repaid`. Fires a `loan_repaid`
-valuation event (+3 score, one-time).
+budget rises above `LOAN_REPAY_BUDGET_THRESHOLD` (set to `LOAN_AMOUNT`
+= 1500 cr) and at least one loan is outstanding, it pays off the
+**oldest outstanding loan** (FIFO): budget -= 1500, loan flagged
+`repaid`. Fires a `loan_repaid` valuation event (+3 score, one-time).
+
+**Why the threshold equals `LOAN_AMOUNT`, not higher:** an earlier
+default of 3000 cr was empirically unreachable — 60-week diagnostics
+showed peak company budgets rarely exceeding 2000 cr in this economy.
+Loans never cycled, instead stacked up overdue and accumulated the
+compounding -5/quarter penalty. Pulling the threshold down to
+`LOAN_AMOUNT` means "if you can afford to clear a loan in a single
+payment, do it now." Companies that earn a positive week climb to
+1500 cr, settle the oldest loan, and resume operations with a fresh
+slate. The trade-off: post-repayment budget is 0 cr, so the company
+is vulnerable to needing another loan immediately if their next week
+is bad. That cycle (loan → use → earn → repay → loan → ...) is itself
+a small valuation tailwind: each cycle nets +3 score from
+`loan_repaid` and avoids the future `loan_overdue` events that would
+otherwise compound.
 
 ### The compounding overdue penalty
 
@@ -639,7 +654,7 @@ Every tunable, its current value, and its home. **Keep this table in sync.**
 | **`LOAN_AMOUNT`** | **1500.0** | principal of each emergency loan |
 | **`LOAN_TERM_WEEKS`** | **12** | quarterly term — unpaid loans accrue penalty per quarterly tick beyond this |
 | **`LOAN_TRIGGER_BUDGET_THRESHOLD`** | **500.0** | budget below this + roster<6 → auto-take a loan |
-| **`LOAN_REPAY_BUDGET_THRESHOLD`** | **3000.0** | budget above this → auto-repay oldest loan |
+| **`LOAN_REPAY_BUDGET_THRESHOLD`** | **= LOAN_AMOUNT (1500.0)** | budget above this → auto-repay oldest loan. Originally 3000 but unreachable in practice — see §6b. |
 | **`MAX_OUTSTANDING_LOANS`** | **3** | hard cap on stacked debt per company |
 
 ### `runner_sim/market/roster.py` / `deployment.py`
