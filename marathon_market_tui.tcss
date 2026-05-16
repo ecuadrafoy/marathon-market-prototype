@@ -133,3 +133,13 @@ Footer {
     padding: 1 2;
     overflow-y: auto;
 }
+
+/* News history screen */
+#news-history-container {
+    width: 80%;
+    height: 90%;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+    overflow-y: auto;
+}

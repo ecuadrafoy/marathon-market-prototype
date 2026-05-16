@@ -108,7 +108,7 @@ def _print_planning(s: GameState) -> None:
         for item in reversed(s.news_feed[-5:]):
             print(f"  W{item.week:>2}  {item.text}")
 
-    print(f"\n[B]uy  [S]ell  [A]ll in  s[K] shells  [R]oster  [H]old / advance week  [Q]uit")
+    print(f"\n[B]uy  [S]ell  [A]ll in  s[K] shells  [R]oster  [N]ews  [H]old / advance week  [Q]uit")
 
 
 def _print_results(s: GameState, value_before: float) -> None:
@@ -338,6 +338,30 @@ def _show_runners(s: GameState) -> None:
     input("\nPress ENTER to return...")
 
 
+def _show_news_history(s: GameState) -> None:
+    """Full-screen news view — every event still in the rolling feed,
+    most recent at top, grouped by week with a thin separator.
+    """
+    print(f"\n{DIVIDER}")
+    print(f"  NEWS HISTORY  ·  Week {s.week}  ·  {len(s.news_feed)} events buffered")
+    print(DIVIDER)
+
+    if not s.news_feed:
+        print("\n  (no events yet — advance the week to populate the feed)")
+        input("\nPress ENTER to return...")
+        return
+
+    prev_week = None
+    for item in reversed(s.news_feed):
+        # Visual separator between distinct week blocks
+        if prev_week is not None and item.week != prev_week:
+            print("  " + "─" * 50)
+        prev_week = item.week
+        company_tag = f"[{item.company_name}]" if item.company_name else "[—]"
+        print(f"  W{item.week:>3}  {company_tag:<14} {item.text}")
+    input("\nPress ENTER to return...")
+
+
 # ---------------------------------------------------------------------------
 # INPUT HANDLERS
 # ---------------------------------------------------------------------------
@@ -442,8 +466,11 @@ def run_console() -> None:
             elif action == "R":
                 _show_runners(s)
                 _print_planning(s)
+            elif action == "N":
+                _show_news_history(s)
+                _print_planning(s)
             else:
-                print("  Enter B, S, A, K, R, H, or Q.")
+                print("  Enter B, S, A, K, R, N, H, or Q.")
 
         print(f"\n  Simulating week {s.week}...")
         engine.advance_week()

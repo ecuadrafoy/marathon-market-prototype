@@ -675,6 +675,60 @@ class RunnerRegistryScreen(ModalScreen):
         return "\n".join(lines)
 
 
+class NewsHistoryScreen(ModalScreen):
+    """Full-screen view of the rolling news feed.
+
+    Shows the full GameState.news_feed (up to NEWS_FEED_MAX_ITEMS), most
+    recent at top, formatted identically to the ticker with company-color
+    coding and kind glyphs. Triggered by 'n' from the main app.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("enter", "dismiss", "Close"),
+        Binding("n", "dismiss", "Close"),
+    ]
+
+    DEFAULT_CSS = """
+    NewsHistoryScreen { align: center middle; }
+    """
+
+    def __init__(self, state: GameState) -> None:
+        super().__init__()
+        self._state = state
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="news-history-container"):
+            yield Static(self._build_content(), id="news-history-body")
+            yield Label(
+                "[dim]Escape / Enter / N to close[/dim]",
+                id="news-history-footer",
+            )
+
+    def _build_content(self) -> str:
+        feed = self._state.news_feed
+        if not feed:
+            return "[dim]No events recorded yet — advance the week to populate the feed.[/dim]"
+
+        lines = [
+            f"[bold]NEWS HISTORY[/bold]  ·  Week {self._state.week}  ·  {len(feed)} events",
+            "",
+        ]
+        # Most recent first — matches the ticker's leading-item layout.
+        prev_week = None
+        for item in reversed(feed):
+            # Insert a thin separator between distinct week blocks so the
+            # reader can see weekly chunking at a glance.
+            if prev_week is not None and item.week != prev_week:
+                lines.append("[dim]─────────[/dim]")
+            prev_week = item.week
+            glyph, default_color = _NEWS_KIND_STYLE.get(item.kind, ("·", "white"))
+            color = _NEWS_COMPANY_COLOR.get(item.company_name or "", default_color)
+            week_tag = f"[dim]W{item.week:>3}[/dim]"
+            lines.append(f"{glyph} {week_tag}  [{color}]{item.text}[/{color}]")
+        return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # MAIN APP
 # ---------------------------------------------------------------------------
@@ -688,6 +742,7 @@ class MarathonMarketApp(App):
         Binding("a", "all_in", "All-in"),
         Binding("k", "shells", "Shells"),
         Binding("r", "runners", "Roster"),
+        Binding("n", "news", "News"),
         Binding("h", "advance_week", "Hold/Advance"),
         Binding("enter", "advance_week", "Advance", show=False),
         Binding("q", "quit", "Quit"),
@@ -741,6 +796,9 @@ class MarathonMarketApp(App):
 
     def action_runners(self) -> None:
         self.push_screen(RunnerRegistryScreen(self.engine.state))
+
+    def action_news(self) -> None:
+        self.push_screen(NewsHistoryScreen(self.engine.state))
 
     def action_advance_week(self) -> None:
         if self.phase == "planning":
