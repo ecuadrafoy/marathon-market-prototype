@@ -342,6 +342,63 @@ class ShellTickerPanel(Static):
 
 
 # ---------------------------------------------------------------------------
+# News ticker — rolling feed of company events with company color-coding
+# ---------------------------------------------------------------------------
+# Tailwind-ish company-color tokens for news lines. Match the panel borders.
+_NEWS_COMPANY_COLOR: dict[str, str] = {
+    "CyberAcme": "green",
+    "Sekiguchi": "cyan",
+    "Traxus":    "#ff8c00",
+    "NuCaloric": "red",
+}
+
+# Per-event-kind glyph + style. Keeps the ticker scannable at a glance.
+_NEWS_KIND_STYLE: dict[str, tuple[str, str]] = {
+    # kind            (prefix glyph,  default color when no company match)
+    "wipe":          ("[red]✖[/red]",      "red"),
+    "inactive":      ("[red]∅[/red]",      "red"),
+    "orphan":        ("[yellow]⌀[/yellow]", "yellow"),
+    "loan_taken":    ("[yellow]$[/yellow]", "yellow"),
+    "loan_repaid":   ("[green]$[/green]",  "green"),
+    "loan_overdue":  ("[red]$[/red]",      "red"),
+    "quarterly":     ("[bold yellow]◆[/bold yellow]", "yellow"),
+    "trade_buy":     ("[green]↑[/green]",  "green"),
+    "trade_sell":    ("[red]↓[/red]",      "red"),
+}
+
+
+class NewsTickerPanel(Static):
+    """Rolling feed of recent company events.
+
+    Displays the last N items from `GameState.news_feed`, most recent at top,
+    color-coded by company. Designed as a horizontal strip just under the
+    status bar — a "what just happened" glance for the player.
+    """
+
+    NEWS_VISIBLE_ITEMS = 4
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__("", **kwargs)
+        self.border_title = "NEWS"
+
+    def refresh_content(self, state: GameState) -> None:
+        feed = state.news_feed[-self.NEWS_VISIBLE_ITEMS:] if state.news_feed else []
+        if not feed:
+            self.update("[dim]No events yet — advance the week.[/dim]")
+            return
+
+        # Most recent on top — reverse so the latest news leads.
+        lines = []
+        for item in reversed(feed):
+            glyph, default_color = _NEWS_KIND_STYLE.get(item.kind, ("·", "white"))
+            color = _NEWS_COMPANY_COLOR.get(item.company_name or "", default_color)
+            week_tag = f"[dim]W{item.week:>2}[/dim]"
+            lines.append(f"{glyph} {week_tag} [{color}]{item.text}[/{color}]")
+
+        self.update("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # MODAL SCREENS
 # ---------------------------------------------------------------------------
 class BuyModal(ModalScreen[tuple[str, int] | None]):
@@ -645,6 +702,7 @@ class MarathonMarketApp(App):
 
     def compose(self) -> ComposeResult:
         yield Label("", id="status-bar")
+        yield NewsTickerPanel(id="news-ticker-panel")
         with Horizontal(id="companies-row"):
             for c in self.engine.state.companies:
                 yield CompanyPanel(c.name)
@@ -662,7 +720,9 @@ class MarathonMarketApp(App):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if self.phase == "simulating" and action != "quit":
             return False
-        if self.phase == "results" and action in ("buy", "sell", "all_in", "shells"):
+        if self.phase in ("results", "quarterly") and action in ("buy", "sell", "all_in"):
+            # Trades + all-in only allowed during planning. Shells/Roster reads
+            # are read-only so we permit them during results / quarterly.
             return False
         return True
 
@@ -686,6 +746,9 @@ class MarathonMarketApp(App):
         if self.phase == "planning":
             self._refresh_all("simulating")
             self._run_week()
+        elif self.phase == "quarterly":
+            # Player acknowledged the quarterly report — move on to normal results.
+            self._refresh_all("results")
         elif self.phase == "results":
             self._refresh_all("planning")
 
@@ -715,7 +778,13 @@ class MarathonMarketApp(App):
         self.post_message(WeekComplete())
 
     def on_week_complete(self, _: WeekComplete) -> None:
-        self._refresh_all("results")
+        # If a quarterly report just fired, route into the quarterly phase first
+        # so the orange banner highlights the moment. Player advances through it
+        # to land on the normal results panel.
+        if self.engine.state.last_quarterly_reports is not None:
+            self._refresh_all("quarterly")
+        else:
+            self._refresh_all("results")
 
     # ── Refresh ──────────────────────────────────────────────────────────────
 
@@ -724,10 +793,17 @@ class MarathonMarketApp(App):
         self.refresh_bindings()
         s = self.engine.state
 
-        status = f"MARATHON MARKET  ·  Week {s.week}  ·  {phase.upper()}"
+        # Status bar: phase-aware text + a `quarterly` CSS class hook for the
+        # orange-banner highlight when a quarterly report just fired.
+        if phase == "quarterly":
+            status = f"⚑ QUARTERLY REPORT  ·  Week {s.week - 1}  ·  press [ENTER] to continue ⚑"
+        else:
+            status = f"MARATHON MARKET  ·  Week {s.week}  ·  {phase.upper()}"
         if status_msg:
             status += f"   {status_msg}"
-        self.query_one("#status-bar", Label).update(status)
+        bar = self.query_one("#status-bar", Label)
+        bar.update(status)
+        bar.set_class(phase == "quarterly", "quarterly")
 
         for panel in self.query(CompanyPanel):
             panel.refresh_content(s, phase)
@@ -735,3 +811,4 @@ class MarathonMarketApp(App):
         self.query_one(PortfolioPanel).refresh_content(s, phase)
         self.query_one(ZoneIntelPanel).refresh_content(s, phase)
         self.query_one(ShellTickerPanel).refresh_content(s)
+        self.query_one(NewsTickerPanel).refresh_content(s)

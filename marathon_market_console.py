@@ -102,6 +102,12 @@ def _print_planning(s: GameState) -> None:
                     line += f"  ({_fmt_pct(r.price_change_pct)} last week)"
         print(line)
 
+    # News ticker — last few events, most recent first.
+    if s.news_feed:
+        print(f"\nNEWS")
+        for item in reversed(s.news_feed[-5:]):
+            print(f"  W{item.week:>2}  {item.text}")
+
     print(f"\n[B]uy  [S]ell  [A]ll in  s[K] shells  [R]oster  [H]old / advance week  [Q]uit")
 
 
@@ -140,11 +146,22 @@ def _print_results(s: GameState, value_before: float) -> None:
                 print(f"  {company.name:<12} roster held — no casualties")
 
     # Quarterly valuation report — fires every QUARTERLY_REPORT_WEEKS weeks.
-    # Releases all the pending deltas accumulated since the last report.
+    # Wrapped in ANSI orange-background escape codes so the report state is
+    # visually distinct from a normal results week. Terminals that don't
+    # support ANSI will show the literal escape sequences, which is ugly but
+    # not breaking; the TUI is the primary surface for this state anyway.
     if s.last_quarterly_reports:
-        print(f"\n{'═' * 52}")
-        print(f"  QUARTERLY VALUATION REPORT  ·  Week {s.week - 1}")
-        print(f"{'═' * 52}")
+        # \033[48;5;208m = orange background; \033[30m = black foreground; \033[0m = reset
+        ORANGE = "\033[48;5;208m\033[30m"
+        RESET = "\033[0m"
+        WIDTH = 60  # band width
+        def _band(text: str) -> str:
+            padded = text + " " * max(0, WIDTH - len(text))
+            return f"{ORANGE}{padded}{RESET}"
+        print()
+        print(_band(" "))
+        print(_band(f"  ⚑ QUARTERLY VALUATION REPORT  ·  Week {s.week - 1}"))
+        print(_band(" "))
         for company in s.companies:
             entry = s.last_quarterly_reports.get(company.name)
             if entry is None:
@@ -152,8 +169,10 @@ def _print_results(s: GameState, value_before: float) -> None:
             before, delta, after = entry
             sign = "+" if delta >= 0 else ""
             pct = (delta / before * 100) if before > 0 else 0.0
-            print(f"  {company.name:<12} {before:>6.0f} → {after:>6.0f} cr  "
-                  f"({sign}{delta:.0f}, {sign}{pct:.1f}%)")
+            line = (f"  {company.name:<12} {before:>6.0f} → {after:>6.0f} cr  "
+                    f"({sign}{delta:.0f}, {sign}{pct:.1f}%)")
+            print(_band(line))
+        print(_band(" "))
 
     if s.last_zone_results:
         hidden_zones = [z for z in ZONES if not z.monitored]
