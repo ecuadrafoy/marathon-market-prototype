@@ -226,6 +226,195 @@ account for available supply.
 
 ---
 
+## AI Investor Crowd
+
+**Idea:** Today the player is the *entire* investor class. Every cr of capital
+flowing into `Company.budget` beyond extraction income comes from one human's
+decisions. Companies the player ignores starve. Adding a crowd of AI
+investors trading alongside the player turns the market from "one
+philanthropist + four desperate companies" into a real economy with baseline
+capital flow, liquidity, and sentiment diversity.
+
+### Motivation
+
+Cross-seed 24-week simulations on `ai-companies` showed wild return variance
+(+25% to +748%) and a winner-take-most pattern in 4 of 5 seeds. The variance
+isn't "the economy being chaotic" — it's "the economy missing 90% of its
+participants." A player who ignores a company is, by definition, the entire
+reason that company has no investor capital. With AI investors, ignored
+companies still receive *some* baseline capital; the player becomes one voice
+in a crowd rather than the only voice.
+
+### Architecture already supports this
+
+The plumbing is in place; what's needed is *agents*, not new pipes:
+
+- **`Portfolio`** is a generic dataclass — instantiate one per AI investor.
+  Each has its own `credits` + `holdings`.
+- **`GameEngine.do_buy` / `do_sell`** are the trade API — any caller works.
+  Valuation event accrual (`+1/share` / `-1/share`) and budget injection
+  (`PLAYER_BUY_TO_BUDGET_RATIO * cost → Company.budget`) fire generically.
+- **Event names** (`player_buy` / `player_sell` in `valuation_delta_for_event`)
+  would want a cosmetic rename to `investor_buy` / `investor_sell` — they're
+  already conceptually about *any* investor.
+
+### Key design questions
+
+1. **Homogenous crowd or distinct personalities?**
+   - One blob — simple, just adds baseline flow. "The market" buys on good
+     extraction weeks.
+   - Multiple archetypes (value, momentum, contrarian, panic seller) — each
+     a distinct AI giving the player different signals to triangulate.
+
+2. **What signals do AIs trade on?**
+   - Price momentum (chase winners)
+   - Valuation (buy when price < fair_value — value investing)
+   - Quarterly reports (react to the cr delta)
+   - Roster health (read deployments_survived, veteran density)
+   - Each strategy could anchor one personality.
+
+3. **Finite share supply or unbounded?**
+   - Unbounded (current state) — everyone buys at the listed price; no
+     scarcity. AI buys are pure capital injection, no order-flow effect.
+   - Finite (`Company.total_shares`) — AIs and the player compete for a
+     shared pool. Scarcity creates real demand pressure; could let the
+     stock price *itself* respond to order flow, not just performance.
+
+4. **AI capital pool — fixed or replenishing?**
+   - Fixed pool per AI — late game capital naturally scarcer as it sits
+     locked in holdings.
+   - Weekly replenishment — keeps the market liquid forever; more forgiving.
+
+5. **How visible are AIs to the player?**
+   - Anonymous "market depth" — see *that* shares were bought, not by whom.
+   - Named characters with stable strategies — "Voss Capital is a value
+     buyer; Sekiguchi Holdings always backs Sekiguchi." Makes AI trades
+     into *information* rather than background noise.
+
+6. **Do AI trades execute every week, or on a schedule?**
+   - Synchronous (every AI moves every week) — simpler, predictable.
+   - Async (each AI has its own trade cadence) — more lifelike, harder to
+     reason about.
+
+### Interaction with adjacent future-design areas
+
+- **Player-as-Board-Member** (above): AI investors compete with the player
+  for ownership accumulation. Need `Company.total_shares` to model finite
+  supply — listed there as the required model upgrade.
+- **Adaptive Company AI**: AI investors give the company AI more readable
+  signals (e.g. "investor sentiment turned bullish on us" could be a new
+  health signal alongside the price MA).
+- **Valuation sell-side coupling**: deferred earlier (does selling drain
+  budget?). With AI buyers ready to absorb player sells, the asymmetry
+  starts feeling more like a real market — may resolve the deferred
+  question by reframing it.
+
+### Architectural breadcrumbs already in place
+
+- **`Portfolio`** dataclass — one per investor instance (see above).
+- **`GameEngine.do_buy` / `do_sell`** — the call site for any agent.
+- **`valuation_delta_for_event`** — already supports per-event weights; AI
+  trades fire the same events the player does.
+- **`GameState`** — needs a new `ai_investors: list[Portfolio]` field (or
+  similar) to hold the crowd.
+- **`advance_week`** — needs a step "let each AI investor decide trades"
+  somewhere; probably AFTER the AI cycle (when this week's results are
+  known) and BEFORE the next planning phase (so the player sees the crowd
+  reacted).
+
+### What it would visibly change in play
+
+- Variance across seeds should compress — the death-spiral floor lifts when
+  any company gets *some* baseline capital from disinterested AI buyers.
+- The player's role shifts from "sole capital provider" to "smart money
+  trying to outperform the crowd" — a more recognisable investor archetype.
+- Reading AI sentiment becomes a new layer of gameplay: front-run, fade, or
+  follow.
+
+### The concrete economic gap this is meant to fill
+
+The loan system added on the `deployment-and-posture` branch is a
+**short-term lifeline** — it buys broke companies ~15-20 weeks of survival
+through emergency financing — but it doesn't break the underlying death
+spiral. Empirical 50-week runs show:
+
+- Average company P&L runs at a small but *consistent* deficit:
+  ~30% of extraction credits as income vs. ~115% of that as upkeep + bidding
+  outflow. The system is roughly -12 cr/week net per company on average.
+- Loans extend survival by adding 3 × 1500cr = 4500cr emergency capital,
+  but companies cap at `MAX_OUTSTANDING_LOANS = 3` and eventually die when
+  no further borrowing is possible.
+- Compounding `loan_overdue` + `week_inactive` valuation penalties make
+  stuck companies *visibly* decay (CyberAcme: valuation 5000 → 3180 over
+  weeks 36-48), but don't generate new income.
+
+The 1-in-4 survival rate at 50 weeks is a defensible *game-design* outcome
+(player picks winners), but if you want long-running games (100+ weeks)
+or want most companies to be viable backdrops to gameplay, **AI investors
+are the structural fix**. They would inject "smart money" capital into
+under-priced companies — exactly when price gaps the valuation anchor and
+fair_value diverge meaningfully, AI value-buyers should fill the gap,
+recapitalising the company's budget.
+
+The mechanism should target this specific signal: **AI value-buyers
+purchase shares when `price < fair_value × discount_threshold`**, where
+fair_value is the existing anchor-derived target. Their buys fire the
+existing `do_buy` path → budget injection → company can make payroll →
+roster rebuilds. The loan system + AI investors compose cleanly: loans
+handle short-term cashflow gaps, AI investors handle structural
+under-capitalisation.
+
+---
+
+## Valuation: Sell-Side Economic Coupling
+
+**Status:** the valuation system itself is *built* (three-axis company state:
+`price` weekly, `budget` weekly, `valuation` quarterly). This note captures
+one **deliberately deferred** design question about how player selling
+should couple to company finances.
+
+### Current behaviour (v1)
+
+- **Buying** has two effects: the full purchase price flows *immediately*
+  into `Company.budget` (`PLAYER_BUY_TO_BUDGET_RATIO = 1.0`), and `+1 score
+  per share` accrues to `pending_valuation_delta` for the next quarterly
+  report.
+- **Selling** has *only one* effect: `-1 score per share` accrues to
+  `pending_valuation_delta`. It does **not** touch `Company.budget`
+  (`PLAYER_SELL_CLAWBACK_RATIO = 0.0`).
+
+So the valuation side is symmetric (±1 score/share), but the budget side is
+asymmetric: buying funds operations, selling does not drain them. This
+mirrors the finance distinction between a primary capital raise and a
+secondary-market trade.
+
+### The deferred question
+
+Is the budget asymmetry the right long-term feel, or should selling have a
+direct operational consequence? Two alternatives, both with one-line knobs
+already in place:
+
+- **Sell-side clawback** — set `PLAYER_SELL_CLAWBACK_RATIO > 0` so selling
+  literally drains `Company.budget`. Turns a sell into an economic attack:
+  a player can starve a company of operating capital, not just dent its
+  reputation. Risk: griefing / accidental bankruptcy of a company the
+  player actually likes.
+- **Defer the buy side too** — route the buy-side budget injection through
+  the quarterly counter instead of applying it immediately. Makes buying a
+  pure reputation signal with no instant operational fuel. Cleaner symmetry,
+  but removes the "buy to fund a recovery this week" play.
+
+### Where it plugs in
+
+- `marathon_market.py` — `PLAYER_BUY_TO_BUDGET_RATIO`,
+  `PLAYER_SELL_CLAWBACK_RATIO` constants; `GameEngine.do_buy` / `do_sell`.
+- `valuation_delta_for_event` — the per-event counter weights.
+
+Decision deferred until the valuation system has been play-tested enough to
+know whether the current asymmetry feels good or flat.
+
+---
+
 ## Recruitment & Roster Ecosystem Adjustments
 
 A loose group of smaller adjustments that came up while documenting the
@@ -401,6 +590,8 @@ Current equilibrium: ~58% premium / ~42% middle. To push further:
 | Strategic recruitment | `runner_sim/market/roster.py` | `_hire_one`, `choose_affordable_shell` |
 | Board membership tiers | `marathon_market.py`, new `Portfolio` methods | `Portfolio.ownership_pct`, `Company.total_shares` |
 | Veil lifting on owned companies | `marathon_market.py:print_results` | conditional zone_results render |
+| AI investor crowd | `marathon_market.py`, `GameState`, `advance_week` | new `ai_investors: list[Portfolio]`, AI-trading step |
+| Valuation sell-side coupling | `marathon_market.py` | `PLAYER_SELL_CLAWBACK_RATIO`, `do_buy`/`do_sell` |
 | Permadeath softening | `runner_sim/market/week.py:apply_zone_outcome` | death branch |
 | Mid-career shell upgrades | `runner_sim/market/week.py` (new function) | called per-week |
 | Shell market scarcity | `runner_sim/market/shell_market.py` | new supply tracking |

@@ -11,6 +11,19 @@ Screen {
     text-style: bold;
 }
 
+/* Quarterly-report highlight: orange banner so the report state is unmissable. */
+#status-bar.quarterly {
+    background: #ff8c00;
+    color: #1a1a1a;
+}
+
+/* News ticker — horizontal strip just below the status bar. */
+#news-ticker-panel {
+    height: 6;
+    border: solid $accent;
+    padding: 0 1;
+}
+
 #companies-row {
     layout: horizontal;
     height: 1fr;
@@ -106,6 +119,26 @@ Footer {
     width: 80%;
     height: 80%;
     border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+/* Runner registry screen */
+#runner-registry-container {
+    width: 90%;
+    height: 90%;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+/* News history screen */
+#news-history-container {
+    width: 80%;
+    height: 90%;
+    border: thick $accent;
     background: $surface;
     padding: 1 2;
     overflow-y: auto;

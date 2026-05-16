@@ -11,10 +11,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from runner_sim.market.calibration import bootstrap_default_state
+from runner_sim.market.company_strategy import CompanyRosterEvents, Loan, PostureState
 from runner_sim.market.pricing import CompanyWeekResult
 from runner_sim.market.roster import all_runners as roster_all_runners
 from runner_sim.market.week import simulate_week
 from runner_sim.market.shell_market import BASE_SHELL_PRICE, N_SHELLS, ShellMarket
+from runner_sim.runners import Runner
 from runner_sim.shells import SHELL_ROSTER
 from runner_sim.zone_sim.items import load_items
 from runner_sim.zone_sim.zones import ZONES, Zone
@@ -23,8 +25,34 @@ from runner_sim.zone_sim.zones import ZONES, Zone
 # ---------------------------------------------------------------------------
 # TUNABLE CONSTANTS
 # ---------------------------------------------------------------------------
-STARTING_CREDITS = 10_000.0
-SIM_PAUSE_SECS   = 0.8
+STARTING_CREDITS         = 10_000.0
+SIM_PAUSE_SECS           = 0.8
+STARTING_COMPANY_BUDGET  = 600.0    # initial cash each company has for upkeep + acquisitions
+
+# Share of every player share-purchase that flows into the company's operating
+# budget. 1.0 = full capital injection (player is effectively an investor
+# funding ops). Lower it later if "secondary market" semantics are wanted.
+PLAYER_BUY_TO_BUDGET_RATIO = 1.0
+
+# Share of every player share-sale that is clawed back FROM the company's
+# budget when the player liquidates. 0.0 = no direct clawback — selling
+# instead damages VALUATION (see below), reflecting "loss of confidence"
+# rather than literal cash withdrawal.
+PLAYER_SELL_CLAWBACK_RATIO = 0.0
+
+# ── VALUATION (third axis: enterprise value, separate from price + budget) ──
+# Valuation represents the company's total worth as an enterprise — accumulated
+# brand strength, roster pedigree, market position. Unlike price (twitches
+# weekly on noise) and budget (flows in/out continuously), valuation is
+# REPORTED quarterly. Between reports, events accumulate in
+# Company.pending_valuation_delta and are released at week boundaries that
+# are multiples of QUARTERLY_REPORT_WEEKS. STARTING_VALUATION and
+# VALUATION_CR_PER_COUNTER are now owned by runner_sim.market.pricing — the
+# pricing module needs them for the valuation-anchored price formula and
+# pricing.py is imported BY this module, so we re-import them here to keep
+# the public surface stable.
+from runner_sim.market.pricing import STARTING_VALUATION, VALUATION_CR_PER_COUNTER
+QUARTERLY_REPORT_WEEKS   = 12
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +62,28 @@ SIM_PAUSE_SECS   = 0.8
 class Company:
     name: str
     price: float
+    budget: float = 0.0                            # weekly spending pot for upkeep + bids
+    valuation: float = STARTING_VALUATION          # enterprise value, updated only on quarterly reports
+    pending_valuation_delta: float = 0.0           # accumulates between quarters; reset on report
+    posture: PostureState = field(default_factory=PostureState)  # strategic posture (momentum + risk_appetite)
+    loans: list[Loan] = field(default_factory=list)  # emergency-financing history (outstanding + repaid)
+
+
+# News-ticker item — surfaced in the UI to give the player a rolling feed
+# of "what just happened" across the four companies. Generated in
+# GameEngine.advance_week (sim outcomes) and GameEngine.do_buy/do_sell/do_all_in
+# (player trades).
+@dataclass
+class NewsItem:
+    week: int                # week the event happened
+    company_name: str | None # None for player-level events (rare)
+    text: str                # short headline-style description
+    kind: str                # "wipe" | "loan_taken" | "loan_repaid" | "orphan" | "quarterly" | "trade" | ...
+
+
+# Number of news items retained in the rolling feed. UI typically shows the
+# most recent 4-5; we keep a larger buffer for history / debugging.
+NEWS_FEED_MAX_ITEMS = 50
 
 
 @dataclass
@@ -89,6 +139,19 @@ class GameState:
     expectation_history: list[tuple[int, str, str]] = field(default_factory=list)
     # per-company price history for sparklines
     price_history: dict[str, list[float]] = field(default_factory=dict)
+    # closed-pool free-agent roster — orphaned + dead runners awaiting rehire
+    free_agents: list[Runner] = field(default_factory=list)
+    # most recent week's roster events per company (signings, drops, deaths) —
+    # surfaced by the UI in both planning and results phases so the player
+    # can see WHEN runner purchases and losses happen in the cycle.
+    last_roster_events: dict[str, CompanyRosterEvents] = field(default_factory=dict)
+    # set on quarterly-report weeks (every 12); maps company_name → (before, delta, after).
+    # None on non-report weeks so the UI can detect when a report just fired.
+    last_quarterly_reports: dict[str, tuple[float, float, float]] | None = None
+    # Rolling feed of recent notable events — squad wipes, loans, quarterly
+    # reports, player trades. UI consumes the tail. Bounded at
+    # NEWS_FEED_MAX_ITEMS by _add_news.
+    news_feed: list[NewsItem] = field(default_factory=list)
     debug: bool = False
 
 
@@ -175,18 +238,147 @@ def _build_sector7_previews(rosters, monitored_zone: Zone) -> dict[str, list[str
 
 
 # ---------------------------------------------------------------------------
+# NEWS FEED — rolling event log surfaced to the UI ticker
+# ---------------------------------------------------------------------------
+def _add_news(state: "GameState", company_name: str | None, text: str, kind: str) -> None:
+    """Append a NewsItem to the rolling feed and trim to NEWS_FEED_MAX_ITEMS.
+
+    Called from advance_week (sim outcomes) and do_buy/do_sell/do_all_in
+    (player trades). The UI reads `state.news_feed[-N:]` to render the ticker.
+    """
+    state.news_feed.append(NewsItem(
+        week=state.week, company_name=company_name, text=text, kind=kind,
+    ))
+    if len(state.news_feed) > NEWS_FEED_MAX_ITEMS:
+        # Trim from the front — keep the most recent NEWS_FEED_MAX_ITEMS.
+        del state.news_feed[: len(state.news_feed) - NEWS_FEED_MAX_ITEMS]
+
+
+# ---------------------------------------------------------------------------
+# VALUATION ACCRUAL — the "third axis" of company state
+# ---------------------------------------------------------------------------
+def accrue_valuation(company: Company, score: float, reason: str = "") -> None:
+    """Add a counter score to this company's pending valuation tally.
+
+    `score` is a small signed integer (e.g. +1, -3) representing how much
+    this event nudges the company's reputation. Scores accumulate over the
+    quarter; the multiplication into actual valuation cr happens at the
+    quarterly report (see GameEngine.advance_week). `reason` is for the
+    player-facing breakdown — short label like 'squad_returned'.
+    """
+    company.pending_valuation_delta += score
+
+
+def valuation_delta_for_event(event_kind: str, **context) -> float:
+    """Return the COUNTER SCORE (signed small int) to accrue for one event.
+
+    The score is a unitless tally entry — it does NOT directly equal cr.
+    At the next quarterly report, the company's total accumulated score is
+    multiplied by VALUATION_CR_PER_COUNTER to produce the actual valuation
+    cr movement. This split makes both halves independently tunable:
+      - change the per-event weights here to rebalance event importance
+      - change VALUATION_CR_PER_COUNTER to scale the whole system
+
+    event_kind values currently emitted by the sim:
+      "player_buy"          context: shares: int, price: float
+      "player_sell"         context: shares: int, price: float
+      "squad_returned"      context: credits: float (avg per squad)
+      "squad_eliminated"    context: (none)
+      "runner_orphaned"     context: (none)
+      "runner_signed"       context: (none)
+      "week_inactive"       context: (none)   — company sat out (roster < 6)
+      "loan_overdue"        context: (none)   — outstanding loan past quarterly mark
+      "loan_repaid"         context: (none)   — outstanding loan settled
+    """
+    if event_kind == "player_buy":
+        # Each share purchased posts +1 to the reputation ledger — buying is a
+        # confidence vote, scaled to ownership weight.
+        return +1 * context.get("shares", 1)
+    if event_kind == "player_sell":
+        # Symmetric counterpart — every share sold is a tick against the company.
+        return -1 * context.get("shares", 1)
+    if event_kind == "squad_returned":
+        # Small positive for each successful extraction — these are routine wins.
+        return +1
+    if event_kind == "squad_eliminated":
+        # Asymmetric: wipes hurt harder than wins help. Reputation is fragile.
+        return -3
+    if event_kind == "runner_orphaned":
+        # Public signal of financial distress — labor market notices.
+        return -2
+    if event_kind == "runner_signed":
+        # Modest positive — winning a free-agent draft signals confidence.
+        return +1
+    if event_kind == "week_inactive":
+        # Sat out the week — same magnitude as orphaning. "We didn't show up."
+        return -2
+    if event_kind == "loan_overdue":
+        # An outstanding loan crossed its quarterly deadline. Compounds each
+        # quarter it remains unpaid — debt rots reputation steadily.
+        return -5
+    if event_kind == "loan_repaid":
+        # Creditworthiness restored. One-time reward when a loan settles.
+        return +3
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# RUNNER REGISTRY DATA  (shared by console and TUI runner screens)
+# ---------------------------------------------------------------------------
+def _runner_top_affinity(runner: Runner) -> tuple[str, float]:
+    """Return (shell_name, value) for the runner's highest affinity. Empty
+    runner_affinities (defensive) yields ('—', 0.0)."""
+    if not runner.shell_affinities:
+        return "—", 0.0
+    shell, value = max(runner.shell_affinities.items(), key=lambda kv: kv[1])
+    return shell, value
+
+
+def _registry_groups(state: GameState) -> list[tuple[str, int, list[Runner]]]:
+    """Group runners for the registry screen.
+
+    Returns: list of (header, payroll_total, sorted_runners) tuples. Companies
+    come first in `state.companies` order, then a single 'FREE AGENTS' group.
+    Upkeep is refreshed on every runner before grouping so the displayed
+    numbers match what payroll would actually charge this week.
+    """
+    from runner_sim.market.company_strategy import refresh_upkeep
+
+    groups: list[tuple[str, int, list[Runner]]] = []
+
+    for company in state.companies:
+        roster = state.rosters[company.name]
+        for r in roster.runners:
+            refresh_upkeep(r)
+        # Sort by upkeep descending — most expensive (usually most valuable) first.
+        ordered = sorted(roster.runners, key=lambda r: -r.upkeep_cost)
+        payroll = int(sum(r.upkeep_cost for r in roster.runners))
+        groups.append((company.name, payroll, ordered))
+
+    if state.free_agents:
+        for r in state.free_agents:
+            refresh_upkeep(r)
+        # Free agents: sort by upkeep desc (premium veterans first), so the
+        # most-contested signings stand out.
+        ordered = sorted(state.free_agents, key=lambda r: -r.upkeep_cost)
+        groups.append(("FREE AGENTS", 0, ordered))
+
+    return groups
+
+
+# ---------------------------------------------------------------------------
 # GAME ENGINE  (headless — no I/O; all state mutations go through here)
 # ---------------------------------------------------------------------------
 class GameEngine:
     def __init__(self, debug: bool = False) -> None:
         companies: list[Company] = [
-            Company("CyberAcme", 450.0),
-            Company("Sekiguchi",  380.0),
-            Company("Traxus",     300.0),
-            Company("NuCaloric",  200.0),
+            Company("CyberAcme",  450.0, budget=STARTING_COMPANY_BUDGET),
+            Company("Sekiguchi",  380.0, budget=STARTING_COMPANY_BUDGET),
+            Company("Traxus",     300.0, budget=STARTING_COMPANY_BUDGET),
+            Company("NuCaloric",  200.0, budget=STARTING_COMPANY_BUDGET),
         ]
-        rosters, market = bootstrap_default_state(
-            company_names=tuple(c.name for c in companies)
+        rosters, market, free_agents, id_supplier = bootstrap_default_state(
+            company_names=tuple(c.name for c in companies),
         )
         self.state = GameState(
             companies=companies,
@@ -196,25 +388,63 @@ class GameEngine:
             monitored_zone=next(z for z in ZONES if z.monitored),
             portfolio=Portfolio(),
             price_history={c.name: [c.price] for c in companies},
+            free_agents=free_agents,
             debug=debug,
         )
+        # Stored on the engine (not GameState) since it's a closure-like helper
+        # rather than serialisable state.
+        self._id_supplier = id_supplier
 
     def do_buy(self, company_name: str, shares: int) -> str | None:
-        """Returns error string on failure, None on success."""
+        """Returns error string on failure, None on success.
+
+        Two side-effects on success: the cost flows into the company's
+        operating budget (PLAYER_BUY_TO_BUDGET_RATIO), AND a positive
+        valuation delta accrues for next quarter's report.
+        """
         c = _find_company(self.state.companies, company_name)
         if c is None:
             return f"Unknown company '{company_name}'."
-        return self.state.portfolio.buy(c.name, shares, c.price)
+        cost = shares * c.price
+        err = self.state.portfolio.buy(c.name, shares, c.price)
+        if err is None:
+            c.budget += cost * PLAYER_BUY_TO_BUDGET_RATIO
+            delta = valuation_delta_for_event("player_buy", shares=shares, price=c.price)
+            accrue_valuation(c, delta, reason="player_buy")
+            _add_news(
+                self.state, c.name,
+                f"Investor bought {shares} share{'s' if shares != 1 else ''} of {c.name} @ {c.price:.0f} cr",
+                kind="trade_buy",
+            )
+        return err
 
     def do_sell(self, company_name: str, shares: int) -> str | None:
-        """Returns error string on failure, None on success."""
+        """Returns error string on failure, None on success.
+
+        Selling damages VALUATION (loss of investor confidence) rather than
+        directly draining budget. PLAYER_SELL_CLAWBACK_RATIO is the legacy
+        cash-drain knob; default 0.0 means selling has no immediate budget
+        effect — only the quarterly valuation report registers it.
+        """
         c = _find_company(self.state.companies, company_name)
         if c is None:
             return f"Unknown company '{company_name}'."
-        return self.state.portfolio.sell(c.name, shares, c.price)
+        proceeds = shares * c.price
+        err = self.state.portfolio.sell(c.name, shares, c.price)
+        if err is None:
+            if PLAYER_SELL_CLAWBACK_RATIO > 0:
+                c.budget = max(0.0, c.budget - proceeds * PLAYER_SELL_CLAWBACK_RATIO)
+            delta = valuation_delta_for_event("player_sell", shares=shares, price=c.price)
+            accrue_valuation(c, delta, reason="player_sell")
+            _add_news(
+                self.state, c.name,
+                f"Investor sold {shares} share{'s' if shares != 1 else ''} of {c.name} @ {c.price:.0f} cr",
+                kind="trade_sell",
+            )
+        return err
 
     def do_all_in(self) -> str:
-        """Spread available credits equally across all companies. Returns summary."""
+        """Spread available credits equally across all companies."""
         s = self.state
         if s.portfolio.credits <= 0:
             return "No credits to invest."
@@ -223,8 +453,20 @@ class GameEngine:
         for company in s.companies:
             shares = int(alloc / company.price)
             if shares > 0:
-                s.portfolio.buy(company.name, shares, company.price)
-                bought.append(f"{company.name} ×{shares}")
+                cost = shares * company.price
+                err = s.portfolio.buy(company.name, shares, company.price)
+                if err is None:
+                    company.budget += cost * PLAYER_BUY_TO_BUDGET_RATIO
+                    delta = valuation_delta_for_event(
+                        "player_buy", shares=shares, price=company.price
+                    )
+                    accrue_valuation(company, delta, reason="player_buy")
+                    bought.append(f"{company.name} ×{shares}")
+                    _add_news(
+                        s, company.name,
+                        f"Investor diversified into {company.name} ({shares} sh @ {company.price:.0f} cr)",
+                        kind="trade_buy",
+                    )
         if bought:
             return "Bought: " + "  |  ".join(bought)
         return "Not enough credits to buy even one share."
@@ -234,9 +476,25 @@ class GameEngine:
         s = self.state
         time.sleep(SIM_PAUSE_SECS)
 
+        # Build anchor_inputs so the valuation-anchored price formula in
+        # pricing.py can pull each company's weekly move toward its
+        # fair-value (= starting price scaled by projected_valuation /
+        # STARTING_VALUATION). pending_valuation_delta at this point reflects
+        # events through last week — the intended one-week lag.
+        anchor_inputs = {
+            c.name: (c.valuation, c.pending_valuation_delta, s.price_history[c.name][0])
+            for c in s.companies
+        }
+
         sim_result = simulate_week(
             s.rosters, s.market, ZONES, s.item_catalog,
             company_prices=_prices_dict(s.companies),
+            companies=s.companies,
+            free_agents=s.free_agents,
+            id_supplier=self._id_supplier,
+            price_histories=s.price_history,
+            anchor_inputs=anchor_inputs,
+            current_week=s.week,
         )
 
         for r in sim_result.company_results:
@@ -246,6 +504,7 @@ class GameEngine:
                     s.price_history.setdefault(c.name, []).append(r.price_after)
 
         s.last_results = sim_result.company_results
+        s.last_roster_events = sim_result.roster_events
 
         if s.debug:
             s.last_zone_results = {
@@ -271,6 +530,113 @@ class GameEngine:
             if len(entries) > 6:
                 for e in entries[:-6]:
                     s.expectation_history.remove(e)
+
+        # ── Valuation accrual: bridge sim events → pending valuation delta ──
+        # Each operational event of the week contributes a delta, sized by
+        # valuation_delta_for_event. Accumulates in company.pending_valuation_delta
+        # until the quarterly report (below) releases it into company.valuation.
+        # We also push selected events to the news feed for the UI ticker.
+        for r in sim_result.company_results:
+            company = next(c for c in s.companies if c.name == r.company_name)
+            # Squad returns — one event per successful squad, sized by its credits
+            per_squad_credits = (
+                r.total_credits_extracted / r.squads_returned if r.squads_returned else 0.0
+            )
+            for _ in range(r.squads_returned):
+                delta = valuation_delta_for_event("squad_returned", credits=per_squad_credits)
+                accrue_valuation(company, delta, reason="squad_returned")
+            # Squad wipes — flat. Newsworthy: every wipe goes to the ticker.
+            for _ in range(r.squads_eliminated):
+                delta = valuation_delta_for_event("squad_eliminated")
+                accrue_valuation(company, delta, reason="squad_eliminated")
+            if r.squads_eliminated > 0:
+                n = r.squads_eliminated
+                _add_news(
+                    s, company.name,
+                    f"{company.name} lost {n} squad{'s' if n != 1 else ''} in the field",
+                    kind="wipe",
+                )
+            # Sat out the week (roster < 6, no squads fielded) — public failure.
+            if r.squads_deployed == 0:
+                delta = valuation_delta_for_event("week_inactive")
+                accrue_valuation(company, delta, reason="week_inactive")
+                _add_news(
+                    s, company.name,
+                    f"{company.name} sat out the week — roster too thin to deploy",
+                    kind="inactive",
+                )
+            # Roster events (orphans, drops, signings, loan settlements). Push
+            # newsworthy ones to the ticker — orphans are the financial-distress
+            # signal; signings are normal turnover (sometimes noisy, skipped).
+            ev = sim_result.roster_events.get(company.name)
+            if ev is not None:
+                for _ in ev.orphaned_unaffordable:
+                    delta = valuation_delta_for_event("runner_orphaned")
+                    accrue_valuation(company, delta, reason="runner_orphaned")
+                if ev.orphaned_unaffordable:
+                    n = len(ev.orphaned_unaffordable)
+                    _add_news(
+                        s, company.name,
+                        f"{company.name} couldn't make payroll — orphaned {n} runner{'s' if n != 1 else ''}",
+                        kind="orphan",
+                    )
+                for _ in ev.signed:
+                    delta = valuation_delta_for_event("runner_signed")
+                    accrue_valuation(company, delta, reason="runner_signed")
+                for _ in range(ev.loans_repaid):
+                    delta = valuation_delta_for_event("loan_repaid")
+                    accrue_valuation(company, delta, reason="loan_repaid")
+                if ev.loans_repaid > 0:
+                    _add_news(
+                        s, company.name,
+                        f"{company.name} repaid {ev.loans_repaid} loan{'s' if ev.loans_repaid != 1 else ''} (+ creditworthiness)",
+                        kind="loan_repaid",
+                    )
+                if ev.loans_taken > 0:
+                    _add_news(
+                        s, company.name,
+                        f"{company.name} took emergency loan ({int(ev.loans_taken * 1500)} cr) to rebuild",
+                        kind="loan_taken",
+                    )
+
+        # ── Quarterly report: convert accumulated counter score into cr ──
+        # Fires on weeks 12, 24, 36, ... Before converting, scan each company's
+        # outstanding loans and fire loan_overdue events for any that have
+        # crossed the quarterly mark — these compound (a loan unpaid for 2
+        # quarters fires the penalty at both ticks).
+        # Then the standard quarterly conversion: pending score × cr_per_counter.
+        s.last_quarterly_reports = None
+        if s.week % QUARTERLY_REPORT_WEEKS == 0:
+            # Scan loans first so overdue penalties land in this quarter's report.
+            from runner_sim.market.company_strategy import overdue_loans
+            for company in s.companies:
+                overdue = overdue_loans(company.loans, current_week=s.week)
+                for _ in overdue:
+                    delta = valuation_delta_for_event("loan_overdue")
+                    accrue_valuation(company, delta, reason="loan_overdue")
+                if overdue:
+                    n = len(overdue)
+                    _add_news(
+                        s, company.name,
+                        f"{company.name}: {n} loan{'s' if n != 1 else ''} overdue — quarterly penalty hit",
+                        kind="loan_overdue",
+                    )
+
+            reports: dict[str, tuple[float, float, float]] = {}
+            for company in s.companies:
+                before = company.valuation
+                score = company.pending_valuation_delta
+                delta_cr = score * VALUATION_CR_PER_COUNTER
+                company.valuation = max(0.0, before + delta_cr)
+                company.pending_valuation_delta = 0.0
+                reports[company.name] = (before, delta_cr, company.valuation)
+                sign = "+" if delta_cr >= 0 else ""
+                _add_news(
+                    s, company.name,
+                    f"Q-REPORT: {company.name} valuation {before:.0f} → {company.valuation:.0f} ({sign}{delta_cr:.0f} cr)",
+                    kind="quarterly",
+                )
+            s.last_quarterly_reports = reports
 
         s.week += 1
 

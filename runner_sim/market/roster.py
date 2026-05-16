@@ -104,40 +104,40 @@ def create_roster(
     company_name: str,
     market: ShellMarket,
     used_names: set[str],
+    id_supplier=None,
 ) -> CompanyRoster:
-    """Build a fresh roster of STARTING_ROSTER_SIZE recruits."""
+    """Build a fresh roster of STARTING_ROSTER_SIZE recruits.
+
+    id_supplier (callable returning int) lets the caller share one counter
+    across rosters + free agents — needed once runners migrate between
+    companies (closed-pool design). When None, falls back to a per-roster
+    counter for backward compatibility with isolated tests.
+    """
     roster = CompanyRoster(company_name=company_name, next_runner_id=0)
     for _ in range(STARTING_ROSTER_SIZE):
-        runner = _hire_one(company_name, roster.next_runner_id, market, used_names)
+        if id_supplier is not None:
+            new_id = id_supplier()
+        else:
+            new_id = roster.next_runner_id
+            roster.next_runner_id += 1
+        runner = _hire_one(company_name, new_id, market, used_names)
         roster.runners.append(runner)
-        roster.next_runner_id += 1
     return roster
 
 
-def replace_dead_runners(
-    roster: CompanyRoster,
-    market: ShellMarket,
-    used_names: set[str],
-) -> int:
-    """Remove runners who died this week and hire replacements.
+def cull_dead_runners(roster: CompanyRoster) -> list[Runner]:
+    """Remove runners flagged `_died_this_week` from the roster.
 
-    A runner is considered "dead this week" if their `death_count` was just
-    incremented (squad eliminated). We detect this by checking a sentinel
-    flag set on the runner during apply_zone_outcome — see week.py.
-
-    Returns the number of replacements hired.
+    Returns the removed runners so the caller can route them into the
+    free-agent pool (consciousness persists; the bio-synthetic body is gone).
+    Replaces the v0 `replace_dead_runners` — hiring is now driven by the
+    company-AI bidding flow, not auto-replacement.
     """
-    survivors = [r for r in roster.runners if not getattr(r, "_died_this_week", False)]
-    deaths = len(roster.runners) - len(survivors)
-    roster.total_deaths += deaths   # accumulate before the dead runners are discarded
-    roster.runners = survivors
-
-    for _ in range(deaths):
-        runner = _hire_one(roster.company_name, roster.next_runner_id, market, used_names)
-        roster.runners.append(runner)
-        roster.next_runner_id += 1
-
-    return deaths
+    dead = [r for r in roster.runners if getattr(r, "_died_this_week", False)]
+    if dead:
+        roster.total_deaths += len(dead)
+        roster.runners = [r for r in roster.runners if not getattr(r, "_died_this_week", False)]
+    return dead
 
 
 def collect_used_names(rosters: dict[str, CompanyRoster]) -> set[str]:

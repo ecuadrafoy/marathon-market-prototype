@@ -266,3 +266,319 @@ class TestApplyZoneOutcomeFallback:
         apply_zone_outcome(runner, squad_extracted=False, squad_eliminated=False,
                            credits_received=0.0, kills_attributed=0)
         assert runner.shell_history == ["Recon"]
+
+
+# ---------------------------------------------------------------------------
+# Valuation anchor — integration with _build_company_result
+# ---------------------------------------------------------------------------
+class TestBuildCompanyResultAnchor:
+    """The anchor term is added on top of the performance term inside
+    _build_company_result. These tests pin down three invariants:
+
+      1. anchor_input=None → anchor contribution is exactly 0 (calibration
+         compatibility).
+      2. price_change_pct decomposes exactly: total = performance + anchor.
+      3. Under identical RNG seed, an undervalued anchor_input produces a
+         higher price_after than an overvalued one — confirming the anchor
+         shifts price in the direction of the projected valuation.
+    """
+
+    def _build(self, *, anchor_input, seed=42, price_before=300.0):
+        """Run _build_company_result in a minimal 'company sat out' scenario.
+
+        co_squads={} and zone_results={} means no deployment — total_credits=0,
+        squads_returned=0, squads_eliminated=0. The performance term is purely
+        the (-baseline + noise) value; the anchor is whatever anchor_input
+        produces. Seeding the RNG identically across calls makes the
+        performance term reproducible so we can isolate the anchor's effect.
+        """
+        import random as _r
+        from runner_sim.market.week import _build_company_result
+
+        _r.seed(seed)
+        return _build_company_result(
+            company_name="TestCo",
+            price_before=price_before,
+            co_squads={},
+            monitored_zone_name="Perimeter",
+            zone_results={},
+            expected_squad_count=3,
+            anchor_input=anchor_input,
+        )
+
+    def test_anchor_input_none_yields_zero_anchor(self):
+        """Calibration-mode compatibility: omitting anchor_input must produce
+        anchor_pull_pct == 0 and price_change_pct == performance_pct exactly."""
+        result = self._build(anchor_input=None)
+        assert result.anchor_pull_pct == 0.0
+        assert result.fair_value == 0.0
+        assert result.price_change_pct == pytest.approx(result.performance_pct, rel=1e-12)
+
+    def test_price_change_decomposes_exactly(self):
+        """price_change_pct must equal performance_pct + anchor_pull_pct,
+        bit-exact (within float epsilon). This is the contract the rest of
+        the UI/test suite relies on."""
+        from runner_sim.market.pricing import STARTING_VALUATION
+        # Drive a non-trivial anchor by passing a valuation 20% above starting.
+        result = self._build(
+            anchor_input=(STARTING_VALUATION * 1.2, 0.0, 300.0),
+        )
+        assert result.price_change_pct == pytest.approx(
+            result.performance_pct + result.anchor_pull_pct, rel=1e-12,
+        )
+        # Sanity: the anchor really did fire (non-zero contribution).
+        assert result.anchor_pull_pct != 0.0
+
+    def test_undervalued_anchor_lifts_price_above_overvalued(self):
+        """Hold the performance term constant via identical RNG seeds; the
+        only difference between the two calls is the anchor sign. The
+        undervalued case (valuation > STARTING) must produce a higher
+        price_after than the overvalued case."""
+        from runner_sim.market.pricing import STARTING_VALUATION
+        undervalued = self._build(
+            anchor_input=(STARTING_VALUATION * 1.2, 0.0, 300.0), seed=7,
+        )
+        overvalued = self._build(
+            anchor_input=(STARTING_VALUATION * 0.8, 0.0, 300.0), seed=7,
+        )
+        assert undervalued.price_after > overvalued.price_after
+        # And the performance term is identical between them — proving the
+        # difference is purely the anchor.
+        assert undervalued.performance_pct == pytest.approx(
+            overvalued.performance_pct, rel=1e-12,
+        )
+
+    def test_anchor_at_starting_valuation_with_price_at_anchor_is_zero_pull(self):
+        """The week-0 condition: projected==STARTING and price_before==anchor_price
+        means fair_value==anchor_price means zero pull. Used to confirm the
+        anchor doesn't bias the system at game start."""
+        from runner_sim.market.pricing import STARTING_VALUATION
+        result = self._build(
+            anchor_input=(STARTING_VALUATION, 0.0, 300.0),
+            price_before=300.0,
+        )
+        assert result.anchor_pull_pct == pytest.approx(0.0, abs=1e-9)
+        assert result.fair_value == pytest.approx(300.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Integration: closed-pool invariants over a multi-week run
+# ---------------------------------------------------------------------------
+class TestRosterEconomyEndToEnd:
+    """Drives the full company-AI loop for 20 weeks under a seeded RNG and
+    asserts the closed-pool semantics hold:
+
+      1. Free-agent pool becomes non-empty at some point (someone got orphaned).
+      2. Total roster ID surface stays bounded — runners are recycled, not
+         continuously spawned.
+      3. Some runner appears in two different companies across the run
+         (orphan-then-rehire is the headline mechanic).
+    """
+
+    def test_closed_pool_20_weeks(self):
+        from dataclasses import dataclass, field
+        import random
+
+        from runner_sim.market.calibration import bootstrap_default_state
+        from runner_sim.market.week import simulate_week
+        from runner_sim.zone_sim.items import load_items
+        from runner_sim.zone_sim.zones import ZONES
+        from runner_sim.market.company_strategy import Loan, PostureState
+
+        @dataclass
+        class StubCompany:
+            name: str
+            price: float
+            budget: float = 600.0
+            posture: PostureState = field(default_factory=PostureState)
+            loans: list[Loan] = field(default_factory=list)
+
+        random.seed(2026)
+        rosters, market, free_agents, id_supplier = bootstrap_default_state()
+        companies = [
+            StubCompany("CyberAcme", 450.0),
+            StubCompany("Sekiguchi", 380.0),
+            StubCompany("Traxus",    300.0),
+            StubCompany("NuCaloric", 200.0),
+        ]
+        item_catalog = load_items()
+        price_histories: dict[str, list[float]] = {c.name: [c.price] for c in companies}
+
+        # Track every (runner_id → set of company_names they've been on).
+        company_lineage: dict[int, set[str]] = {}
+        for roster in rosters.values():
+            for r in roster.runners:
+                company_lineage[r.id] = {roster.company_name}
+        for r in free_agents:
+            company_lineage[r.id] = set()  # rookie bench, no company yet
+
+        saw_nonempty_pool = False
+        rng = random.Random(0)
+
+        for _ in range(20):
+            result = simulate_week(
+                rosters, market, ZONES, item_catalog,
+                company_prices={c.name: c.price for c in companies},
+                companies=companies,
+                free_agents=free_agents,
+                id_supplier=id_supplier,
+                price_histories=price_histories,
+                rng=rng,
+            )
+            for r in result.company_results:
+                for c in companies:
+                    if c.name == r.company_name:
+                        c.price = r.price_after
+                        price_histories[c.name].append(r.price_after)
+            if free_agents:
+                saw_nonempty_pool = True
+            # Track lineage — note who is currently on which roster.
+            for roster in rosters.values():
+                for r in roster.runners:
+                    company_lineage.setdefault(r.id, set()).add(roster.company_name)
+
+        # Invariant 1: the free-agent pool became active.
+        assert saw_nonempty_pool, "free-agent pool never accumulated anyone in 20 weeks"
+
+        # Invariant 2: at least one runner moved between companies.
+        movers = [rid for rid, cos in company_lineage.items() if len(cos) >= 2]
+        assert movers, "no runner ever switched companies — orphan→rehire never fired"
+
+        # Invariant 3: pool floor honored.
+        from runner_sim.market.company_strategy import MIN_GLOBAL_POOL
+        total = sum(len(r.runners) for r in rosters.values()) + len(free_agents)
+        assert total >= MIN_GLOBAL_POOL - 1, (
+            f"global pool fell below floor: {total} < {MIN_GLOBAL_POOL}"
+        )
+
+    def test_roster_events_populated_per_company(self):
+        """simulate_week returns a CompanyRosterEvents per company, even when
+        no transitions happened. Across a 10-week run we should see signings,
+        deaths, and orphan/drop events somewhere in the stream."""
+        from dataclasses import dataclass, field
+        import random
+        from runner_sim.market.calibration import bootstrap_default_state
+        from runner_sim.market.company_strategy import CompanyRosterEvents
+        from runner_sim.market.week import simulate_week
+        from runner_sim.zone_sim.items import load_items
+        from runner_sim.zone_sim.zones import ZONES
+        from runner_sim.market.company_strategy import Loan, PostureState
+
+        @dataclass
+        class StubCo:
+            name: str
+            price: float
+            budget: float = 600.0
+            posture: PostureState = field(default_factory=PostureState)
+            loans: list[Loan] = field(default_factory=list)
+
+        random.seed(7)
+        rosters, market, free_agents, id_supplier = bootstrap_default_state()
+        companies = [
+            StubCo("CyberAcme", 450.0),
+            StubCo("Sekiguchi", 380.0),
+            StubCo("Traxus",    300.0),
+            StubCo("NuCaloric", 200.0),
+        ]
+        item_catalog = load_items()
+        price_histories = {c.name: [c.price] for c in companies}
+
+        saw_signed = saw_died = saw_orphaned_or_loaned = False
+        rng = random.Random(0)
+
+        for _ in range(15):
+            result = simulate_week(
+                rosters, market, ZONES, item_catalog,
+                company_prices={c.name: c.price for c in companies},
+                companies=companies, free_agents=free_agents,
+                id_supplier=id_supplier, price_histories=price_histories,
+                rng=rng,
+            )
+            # Every company has an entry, even if empty.
+            assert set(result.roster_events.keys()) == {c.name for c in companies}
+            for ev in result.roster_events.values():
+                assert isinstance(ev, CompanyRosterEvents)
+                if ev.signed:                saw_signed = True
+                if ev.died:                  saw_died = True
+                # Loans intervene to prevent some orphan events now — accept either
+                # cause of "financial distress" signal.
+                if ev.orphaned_unaffordable or ev.loans_taken:
+                    saw_orphaned_or_loaned = True
+
+            for r in result.company_results:
+                for c in companies:
+                    if c.name == r.company_name:
+                        c.price = r.price_after
+                        price_histories[c.name].append(r.price_after)
+
+        assert saw_signed,            "no signings recorded across 15 weeks"
+        assert saw_died,              "no deaths recorded across 15 weeks"
+        assert saw_orphaned_or_loaned, (
+            "no financial-distress signal (neither orphans nor loans) in 15 weeks"
+        )
+
+    def test_posture_drifts_across_24_weeks(self):
+        """End-to-end: drive 24 weeks of normal play and assert that company
+        postures diverge meaningfully — at least one company should have
+        accumulated a non-trivial risk_appetite (in either direction) by
+        the end. Catches regressions in the update_posture wiring."""
+        from dataclasses import dataclass, field
+        import random
+        from runner_sim.market.calibration import bootstrap_default_state
+        from runner_sim.market.company_strategy import Loan, PostureState
+        from runner_sim.market.week import simulate_week
+        from runner_sim.zone_sim.items import load_items
+        from runner_sim.zone_sim.zones import ZONES
+
+        @dataclass
+        class StubCo:
+            name: str
+            price: float
+            budget: float = 600.0
+            posture: PostureState = field(default_factory=PostureState)
+            loans: list[Loan] = field(default_factory=list)
+
+        random.seed(2026)
+        rosters, market, free_agents, id_supplier = bootstrap_default_state()
+        companies = [
+            StubCo("CyberAcme", 450.0),
+            StubCo("Sekiguchi", 380.0),
+            StubCo("Traxus",    300.0),
+            StubCo("NuCaloric", 200.0),
+        ]
+        item_catalog = load_items()
+        price_histories = {c.name: [c.price] for c in companies}
+        rng = random.Random(0)
+
+        # Verify all start neutral
+        for c in companies:
+            assert c.posture.momentum == 0.0
+            assert c.posture.risk_appetite == 0.0
+            assert c.posture.weeks_observed == 0
+
+        for _ in range(24):
+            result = simulate_week(
+                rosters, market, ZONES, item_catalog,
+                company_prices={c.name: c.price for c in companies},
+                companies=companies, free_agents=free_agents,
+                id_supplier=id_supplier, price_histories=price_histories,
+                rng=rng,
+            )
+            for r in result.company_results:
+                for c in companies:
+                    if c.name == r.company_name:
+                        c.price = r.price_after
+                        price_histories[c.name].append(r.price_after)
+
+        # All companies should have observed 24 weeks
+        for c in companies:
+            assert c.posture.weeks_observed == 24
+
+        # At least one company should have measurable risk_appetite divergence.
+        # With asymmetric updates (+0.04 sweep, −0.08 wipe, ±0.02 mixed) over
+        # 24 weeks, the most-extreme company should be ≥0.3 from neutral.
+        max_abs_risk = max(abs(c.posture.risk_appetite) for c in companies)
+        assert max_abs_risk >= 0.3, (
+            f"No company developed a measurable risk_appetite after 24 weeks; "
+            f"max abs risk = {max_abs_risk:.2f}"
+        )

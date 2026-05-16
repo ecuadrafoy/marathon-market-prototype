@@ -27,6 +27,8 @@ from marathon_market import (
     _fmt_cr,
     _fmt_pct,
     _prices_dict,
+    _registry_groups,
+    _runner_top_affinity,
     _sparkline,
     _trend_arrow,
     roster_all_runners,
@@ -56,9 +58,33 @@ def _print_planning(s: GameState) -> None:
     print(f"\nROSTERS")
     for company in s.companies:
         roster = s.rosters[company.name]
-        avg = sum(r.extraction_attempts for r in roster.runners) / len(roster.runners)
-        print(f"  {company.name:<12} {len(roster.runners)} runners  "
-              f"avg {avg:.1f} extractions, {roster.total_deaths} career deaths")
+        n = len(roster.runners)
+        avg = (sum(r.extraction_attempts for r in roster.runners) / n) if n else 0.0
+        events = (s.last_roster_events or {}).get(company.name)
+        change_str = ""
+        if events is not None:
+            bits = []
+            if events.signed:                 bits.append(f"+{len(events.signed)} signed")
+            if events.orphaned_unaffordable:  bits.append(f"-{len(events.orphaned_unaffordable)} orphaned")
+            if events.voluntarily_dropped:    bits.append(f"-{len(events.voluntarily_dropped)} dropped")
+            if bits:
+                change_str = "  [" + ", ".join(bits) + "]"
+        # pending_valuation_delta is a SCORE (counter), not cr.
+        # Project the cr it will turn into at the next quarterly report.
+        from marathon_market import VALUATION_CR_PER_COUNTER
+        score = company.pending_valuation_delta
+        projected_cr = score * VALUATION_CR_PER_COUNTER
+        pending_str = f" ({score:+.0f}→{projected_cr:+.0f}cr)" if score != 0 else ""
+        print(f"  {company.name:<12} {n} runners  "
+              f"avg {avg:.1f} extr, {roster.total_deaths} deaths  "
+              f"budget {company.budget:>5.0f} cr  "
+              f"val {company.valuation:>5.0f}{pending_str}{change_str}")
+
+    if s.free_agents:
+        idle = max((r.weeks_orphaned for r in s.free_agents), default=0)
+        avg_up = sum(r.upkeep_cost or 0 for r in s.free_agents) / len(s.free_agents)
+        print(f"\nFREE AGENTS  {len(s.free_agents)} idle  "
+              f"avg upkeep {avg_up:.0f} cr  longest idle {idle}w")
 
     print(f"\nZONE INTEL — {s.monitored_zone.name}  ({_difficulty_label(s.monitored_zone.difficulty)})")
     print(f"  (squad lineup randomized at deploy; preview shows roster sample)")
@@ -76,7 +102,13 @@ def _print_planning(s: GameState) -> None:
                     line += f"  ({_fmt_pct(r.price_change_pct)} last week)"
         print(line)
 
-    print(f"\n[B]uy  [S]ell  [A]ll in  s[K] shells  [H]old / advance week  [Q]uit")
+    # News ticker — last few events, most recent first.
+    if s.news_feed:
+        print(f"\nNEWS")
+        for item in reversed(s.news_feed[-5:]):
+            print(f"  W{item.week:>2}  {item.text}")
+
+    print(f"\n[B]uy  [S]ell  [A]ll in  s[K] shells  [R]oster  [N]ews  [H]old / advance week  [Q]uit")
 
 
 def _print_results(s: GameState, value_before: float) -> None:
@@ -101,6 +133,46 @@ def _print_results(s: GameState, value_before: float) -> None:
         label = _expectation_label(r.delta)
         print(f"  {r.company_name:<12} {r.price_before:>7.1f} → {r.price_after:>7.1f} cr  "
               f"({_fmt_pct(r.price_change_pct):>7})  [{label}]")
+
+    # Roster outcome — results phase shows ONLY what happened during deployment.
+    if s.last_roster_events:
+        print(f"\nROSTER OUTCOME")
+        for company in s.companies:
+            ev = s.last_roster_events.get(company.name)
+            died = len(ev.died) if ev else 0
+            if died:
+                print(f"  {company.name:<12} -{died} lost in deployment")
+            else:
+                print(f"  {company.name:<12} roster held — no casualties")
+
+    # Quarterly valuation report — fires every QUARTERLY_REPORT_WEEKS weeks.
+    # Wrapped in ANSI orange-background escape codes so the report state is
+    # visually distinct from a normal results week. Terminals that don't
+    # support ANSI will show the literal escape sequences, which is ugly but
+    # not breaking; the TUI is the primary surface for this state anyway.
+    if s.last_quarterly_reports:
+        # \033[48;5;208m = orange background; \033[30m = black foreground; \033[0m = reset
+        ORANGE = "\033[48;5;208m\033[30m"
+        RESET = "\033[0m"
+        WIDTH = 60  # band width
+        def _band(text: str) -> str:
+            padded = text + " " * max(0, WIDTH - len(text))
+            return f"{ORANGE}{padded}{RESET}"
+        print()
+        print(_band(" "))
+        print(_band(f"  ⚑ QUARTERLY VALUATION REPORT  ·  Week {s.week - 1}"))
+        print(_band(" "))
+        for company in s.companies:
+            entry = s.last_quarterly_reports.get(company.name)
+            if entry is None:
+                continue
+            before, delta, after = entry
+            sign = "+" if delta >= 0 else ""
+            pct = (delta / before * 100) if before > 0 else 0.0
+            line = (f"  {company.name:<12} {before:>6.0f} → {after:>6.0f} cr  "
+                    f"({sign}{delta:.0f}, {sign}{pct:.1f}%)")
+            print(_band(line))
+        print(_band(" "))
 
     if s.last_zone_results:
         hidden_zones = [z for z in ZONES if not z.monitored]
@@ -210,6 +282,86 @@ def _show_shells(s: GameState) -> None:
     input("\nPress ENTER to return...")
 
 
+def _show_runners(s: GameState) -> None:
+    """Runner registry — every runner in the world, grouped by contract.
+
+    Each row shows: name, current shell, weekly upkeep cost, deployments
+    survived, career kills, career net loot, top shell affinity, and (for
+    free agents) how long they've been idle. Columns are sized so a typical
+    80-column terminal fits cleanly.
+    """
+    print(f"\n{DIVIDER}")
+    print(f"  RUNNER REGISTRY  ·  Week {s.week}")
+    print(DIVIDER)
+
+    # Column widths: Name 10 · Shell 10 · Upkeep 8 · Surv 4 · Kills 5 · Loot 7 · Affinity 12 · Idle 4
+    header = (
+        f"    {'Name':<10}  {'Shell':<10}  {'Upkeep':>8}  "
+        f"{'Surv':>4}  {'Kills':>5}  {'Loot':>7}  {'Affinity':<12}  {'Idle':>4}"
+    )
+    rule = "    " + "─" * (len(header) - 4)
+
+    groups = _registry_groups(s)
+    for group_name, payroll, runners in groups:
+        is_free_agents = (group_name == "FREE AGENTS")
+        n = len(runners)
+        if is_free_agents:
+            longest = max((r.weeks_orphaned for r in runners), default=0)
+            section_header = f"FREE AGENTS  ({n} idle · longest idle {longest}w)"
+        else:
+            section_header = f"{group_name}  ({n} runners · payroll {payroll} cr/wk)"
+
+        print(f"\n  [ {section_header} ]")
+        print(header)
+        print(rule)
+
+        for r in runners:
+            shell_label = r.current_shell if r.current_shell else "—"
+            aff_shell, aff_value = _runner_top_affinity(r)
+            aff_str = f"{aff_shell[:3]} {aff_value:.2f}" if aff_value > 0 else "—"
+            premium = aff_shell in PREMIUM_SHELLS and aff_value >= 0.3
+            aff_cell = f"{aff_str}{' ★' if premium else ''}"
+            idle_str = f"{r.weeks_orphaned}w" if is_free_agents else " —"
+            print(
+                f"    {r.name[:10]:<10}  {shell_label[:10]:<10}  "
+                f"{r.upkeep_cost:>6.0f}cr  {r.deployments_survived:>4d}  "
+                f"{r.eliminations:>5d}  {r.net_loot:>7.0f}  "
+                f"{aff_cell:<12}  {idle_str:>4}"
+            )
+
+        if not runners:
+            print("    (none)")
+
+    total_runners = sum(len(rs) for _, _, rs in groups)
+    print(f"\n  Total runners in world: {total_runners}")
+    print("  ★ marks veterans with ≥ 0.30 affinity to a premium shell (Destroyer/Thief/Triage)")
+    input("\nPress ENTER to return...")
+
+
+def _show_news_history(s: GameState) -> None:
+    """Full-screen news view — every event still in the rolling feed,
+    most recent at top, grouped by week with a thin separator.
+    """
+    print(f"\n{DIVIDER}")
+    print(f"  NEWS HISTORY  ·  Week {s.week}  ·  {len(s.news_feed)} events buffered")
+    print(DIVIDER)
+
+    if not s.news_feed:
+        print("\n  (no events yet — advance the week to populate the feed)")
+        input("\nPress ENTER to return...")
+        return
+
+    prev_week = None
+    for item in reversed(s.news_feed):
+        # Visual separator between distinct week blocks
+        if prev_week is not None and item.week != prev_week:
+            print("  " + "─" * 50)
+        prev_week = item.week
+        company_tag = f"[{item.company_name}]" if item.company_name else "[—]"
+        print(f"  W{item.week:>3}  {company_tag:<14} {item.text}")
+    input("\nPress ENTER to return...")
+
+
 # ---------------------------------------------------------------------------
 # INPUT HANDLERS
 # ---------------------------------------------------------------------------
@@ -311,8 +463,14 @@ def run_console() -> None:
             elif action == "K":
                 _show_shells(s)
                 _print_planning(s)
+            elif action == "R":
+                _show_runners(s)
+                _print_planning(s)
+            elif action == "N":
+                _show_news_history(s)
+                _print_planning(s)
             else:
-                print("  Enter B, S, A, K, H, or Q.")
+                print("  Enter B, S, A, K, R, N, H, or Q.")
 
         print(f"\n  Simulating week {s.week}...")
         engine.advance_week()
