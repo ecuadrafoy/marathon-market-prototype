@@ -78,6 +78,11 @@ class CompanyWeekResult:
     monitored_credits: float = 0.0
     monitored_eliminations: int = 0
     monitored_runner_names: list[str] = field(default_factory=list)
+    # per-zone breakdown — internal, feeds CompanyMemory. Only includes zones
+    # this company actually deployed to (under-strength companies skip a zone).
+    per_zone_credits: dict[str, float] = field(default_factory=dict)
+    per_zone_squads_deployed: dict[str, int] = field(default_factory=dict)
+    per_zone_squads_eliminated: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ from runner_sim.market.company_strategy import (
     CompanyRosterEvents,
     PostureState,
     RunnerIdCounter,
+    WeekSnapshot,
     auto_repay_loan,
     collect_company_income,
     decide_acquisitions,
@@ -234,6 +235,17 @@ def _build_company_result(
         float(sq.loot.total_credits()) for sq in co_squads.values() if sq.extracted
     )
 
+    # Per-zone breakdown — only the zones this company deployed to.
+    per_zone_credits: dict[str, float] = {}
+    per_zone_squads_deployed: dict[str, int] = {}
+    per_zone_squads_eliminated: dict[str, int] = {}
+    for zone_name, sq in co_squads.items():
+        per_zone_squads_deployed[zone_name] = 1
+        per_zone_squads_eliminated[zone_name] = 1 if sq.eliminated else 0
+        per_zone_credits[zone_name] = (
+            float(sq.loot.total_credits()) if sq.extracted else 0.0
+        )
+
     # Weekly kills: count runners eliminated by this company's squads across all zones.
     company_squad_names = {sq.name for sq in co_squads.values()}
     total_eliminations = sum(
@@ -313,6 +325,9 @@ def _build_company_result(
         monitored_credits=monitored_credits,
         monitored_eliminations=monitored_kills,
         monitored_runner_names=monitored_runner_names,
+        per_zone_credits=per_zone_credits,
+        per_zone_squads_deployed=per_zone_squads_deployed,
+        per_zone_squads_eliminated=per_zone_squads_eliminated,
     )
 
 
@@ -396,7 +411,8 @@ def simulate_week(
             co_squads_by_company[company_name] = {}
             continue
         posture = company_by_name[company_name].posture if ai_enabled else None
-        zone_to_squad = assign_squads(roster, zones, posture=posture, rng=rng)
+        memory = company_by_name[company_name].memory if ai_enabled else None
+        zone_to_squad = assign_squads(roster, zones, posture=posture, memory=memory, rng=rng)
         co_squads_by_company[company_name] = zone_to_squad
         for zone_name, squad in zone_to_squad.items():
             deployments[zone_name].append((company_name, squad))
@@ -458,6 +474,9 @@ def simulate_week(
     # --- 6. Company AI cycle — runs AFTER deployment so decisions see outcomes.
     # Order matches the natural employment cycle: earn → pay → adjust headcount.
     if ai_enabled:
+        # Snapshot pre-cycle budgets so we can compute budget_delta for memory.
+        pre_cycle_budget: dict[str, float] = {c.name: c.budget for c in companies}
+
         # 6a. Income — credits from this week's extraction fund this week's payroll.
         for company in companies:
             collect_company_income(company, rosters[company.name], credits_by_runner_id)
@@ -538,19 +557,33 @@ def simulate_week(
             if taken is not None:
                 roster_events[company.name].loans_taken += 1
 
-        # 6g. Posture update — reflects this week's outcome, ready for next
-        # week's deployment + decisions. Done LAST in the AI cycle so future
-        # events firing between weeks can mutate posture before next deploy
-        # reads it. Each company reads its own CompanyWeekResult.
+        # 6g. Record this week's snapshot into each company's memory, THEN
+        # update posture (which reads memory). Snapshot-first ordering means
+        # update_posture sees a window that includes the current week as the
+        # latest entry, and posture used by NEXT week's deployment reflects
+        # what just happened. Future inter-week events can mutate posture
+        # between this step and the next week's reads.
         for company in companies:
             r = next(res for res in results if res.company_name == company.name)
-            update_posture(
-                posture=company.posture,
+            roster_size_after = len(rosters[company.name].runners)
+            deaths = len(roster_events[company.name].died)
+            budget_delta = company.budget - pre_cycle_budget[company.name]
+            snap = WeekSnapshot(
+                week=current_week,
                 price_change_pct=r.price_change_pct,
+                extracted_credits=r.total_credits_extracted,
                 squads_deployed=r.squads_deployed,
                 squads_returned=r.squads_returned,
                 squads_eliminated=r.squads_eliminated,
+                per_zone_credits=dict(r.per_zone_credits),
+                per_zone_squads_deployed=dict(r.per_zone_squads_deployed),
+                per_zone_squads_eliminated=dict(r.per_zone_squads_eliminated),
+                deaths=deaths,
+                budget_delta=budget_delta,
+                roster_size_after=roster_size_after,
             )
+            company.memory.record(snap)
+            update_posture(company.posture, company.memory)
 
     # --- 7. Weekly re-equip: surviving runners upgrade to best affordable shell ---
     reequip_survivors(all_runners(rosters), market)

@@ -23,6 +23,7 @@ the same as a Recon rookie until they prove themselves in the field.
 from __future__ import annotations
 import random
 import statistics
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -72,6 +73,15 @@ PRICE_CHANGE_NORM               = 5.0    # divides price_change_pct to land in ~
 # Health bucket thresholds when deriving Health from posture (for display/legacy).
 POSTURE_HEALTH_THRIVE_AT        = 0.25
 POSTURE_HEALTH_STRUGGLE_AT      = -0.25
+
+# ── Company memory (per-zone + multi-week history) ──
+# Rolling window of structured per-week facts. Feeds two consumers:
+#   1. update_posture — smooths price/return inputs across the window.
+#   2. deployment._memory_factor — biases zone selection by recent per-zone
+#      elimination rate and per-zone credit yield.
+# 6 weeks = half a quarter; long enough to absorb a stray bad week, short
+# enough to react when a zone genuinely turns hostile.
+MEMORY_WINDOW_WEEKS             = 6
 
 # ── Loan system (emergency financing for struggling companies) ──
 # When a company is about to sit out (roster < 6) with no remaining cash,
@@ -198,6 +208,79 @@ class PostureState:
     momentum: float = 0.0
     risk_appetite: float = 0.0
     weeks_observed: int = 0    # diagnostic; lets tests assert convergence pace
+
+
+# ---------------------------------------------------------------------------
+# COMPANY MEMORY — rolling per-week buffer
+# ---------------------------------------------------------------------------
+@dataclass
+class WeekSnapshot:
+    """One week of structured company facts, retained in CompanyMemory.
+
+    Lives long enough to inform the next ~MEMORY_WINDOW_WEEKS of decisions,
+    then drops off the back of the deque. Snapshot is built post-week from
+    the company's CompanyWeekResult + pre/post budget delta + roster state.
+    """
+    week: int
+    price_change_pct: float
+    extracted_credits: float
+    squads_deployed: int
+    squads_returned: int
+    squads_eliminated: int
+    per_zone_credits: dict[str, float]
+    per_zone_squads_deployed: dict[str, int]
+    per_zone_squads_eliminated: dict[str, int]
+    deaths: int
+    budget_delta: float
+    roster_size_after: int
+
+
+@dataclass
+class CompanyMemory:
+    """Rolling buffer of WeekSnapshots, capped at MEMORY_WINDOW_WEEKS.
+
+    Read by update_posture (smoothed price/return signal) and
+    deployment._memory_factor (per-zone bias). New entries push oldest off.
+    Empty memory → all derived signals read as neutral (no zone bias, no
+    smoothing input — falls back to current-week inputs at the call site).
+    """
+    snapshots: deque[WeekSnapshot] = field(
+        default_factory=lambda: deque(maxlen=MEMORY_WINDOW_WEEKS)
+    )
+
+    def record(self, snap: WeekSnapshot) -> None:
+        self.snapshots.append(snap)
+
+    def per_zone_elimination_rate(self, zone_name: str) -> float:
+        """Sum(eliminated)/sum(deployed) for this zone across the window.
+
+        Returns 0.0 when the company never deployed to this zone in the
+        window — interpreted as "no signal" by callers.
+        """
+        deployed = sum(
+            s.per_zone_squads_deployed.get(zone_name, 0) for s in self.snapshots
+        )
+        if deployed == 0:
+            return 0.0
+        eliminated = sum(
+            s.per_zone_squads_eliminated.get(zone_name, 0) for s in self.snapshots
+        )
+        return eliminated / deployed
+
+    def per_zone_avg_credits(self, zone_name: str) -> float:
+        """Average per-week credits extracted in this zone across the window.
+
+        Denominator is the number of weeks the company deployed there
+        (weeks with no deployment are skipped, not zeroed in).
+        """
+        weeks = sum(
+            1 for s in self.snapshots
+            if s.per_zone_squads_deployed.get(zone_name, 0) > 0
+        )
+        if weeks == 0:
+            return 0.0
+        total = sum(s.per_zone_credits.get(zone_name, 0.0) for s in self.snapshots)
+        return total / weeks
 
 
 # ---------------------------------------------------------------------------
@@ -345,43 +428,76 @@ def company_health(price_history: list[float]) -> Health:
 # ---------------------------------------------------------------------------
 # POSTURE UPDATE + DERIVED HEALTH VIEW
 # ---------------------------------------------------------------------------
-def update_posture(
-    posture: PostureState,
-    price_change_pct: float,
-    squads_deployed: int,
-    squads_returned: int,
-    squads_eliminated: int,
-) -> None:
-    """Mutate posture in place from this week's outcome.
+def _price_signal(price_change_pct: float) -> float:
+    """Clamp price_change_pct / PRICE_CHANGE_NORM into [-1, +1]."""
+    return max(-1.0, min(1.0, price_change_pct / PRICE_CHANGE_NORM))
 
-    Called at the end of simulate_week, after the bidding draft. The posture
-    used by THIS week's deployment was the posture going INTO the week; we
-    only update it here so that the next week's deploy + decisions read a
-    posture that reflects what just happened.
+
+def _return_rate(squads_deployed: int, squads_returned: int, squads_eliminated: int) -> float:
+    """Clamp (returned - eliminated) / deployed into [-1, +1]; 0 when sat out."""
+    if squads_deployed <= 0:
+        return 0.0
+    net = squads_returned - squads_eliminated
+    return max(-1.0, min(1.0, net / squads_deployed))
+
+
+def _windowed_inputs(memory: CompanyMemory) -> tuple[float, float]:
+    """Average price_signal and return_rate across all snapshots in memory.
+
+    Empty memory returns (0.0, 0.0) — caller falls back to the latest-only
+    path.
     """
-    # Momentum — fast EMA. Blend price signal + return rate as the per-week input.
-    if squads_deployed > 0:
-        net = squads_returned - squads_eliminated
-        return_rate = max(-1.0, min(1.0, net / squads_deployed))
-    else:
-        return_rate = 0.0
-    price_signal = max(-1.0, min(1.0, price_change_pct / PRICE_CHANGE_NORM))
-    this_week = 0.5 * price_signal + 0.5 * return_rate
+    if not memory.snapshots:
+        return 0.0, 0.0
+    prices: list[float] = []
+    returns: list[float] = []
+    for s in memory.snapshots:
+        prices.append(_price_signal(s.price_change_pct))
+        returns.append(_return_rate(s.squads_deployed, s.squads_returned, s.squads_eliminated))
+    return statistics.mean(prices), statistics.mean(returns)
+
+
+def update_posture(posture: PostureState, memory: CompanyMemory) -> None:
+    """Mutate posture in place from the company's memory window.
+
+    Precondition: the caller has already recorded THIS WEEK's WeekSnapshot
+    into memory — so memory.snapshots[-1] is this week, and the rest of the
+    deque is the trailing window. Empty memory is a no-op.
+
+    Two axes:
+      - momentum: fast EMA over the windowed average of price_signal +
+        return_rate. The boxcar smooths short shocks; the EMA on top still
+        provides ~2-week half-life behaviour at the EMA-input level.
+      - risk_appetite: this-week event-driven (wipe / sweep / mixed),
+        unchanged from the pre-memory design. The memory loop should not
+        alter how a single wipe lands.
+    """
+    if not memory.snapshots:
+        return
+    latest = memory.snapshots[-1]
+
+    # Momentum — fast EMA, fed by the windowed average per-week input.
+    avg_price, avg_return = _windowed_inputs(memory)
+    this_week = 0.5 * avg_price + 0.5 * avg_return
     posture.momentum = (1.0 - MOMENTUM_EMA_ALPHA) * posture.momentum + MOMENTUM_EMA_ALPHA * this_week
     posture.momentum = max(-1.0, min(1.0, posture.momentum))
 
-    # Risk appetite — slow accumulator. Asymmetric: wipes 4× baseline, sweeps 2×.
-    if squads_deployed == 0:
+    # Risk appetite — this-week event logic, unchanged. Reads the latest snapshot
+    # so the asymmetric wipe/sweep responses remain crisp.
+    deployed = latest.squads_deployed
+    returned = latest.squads_returned
+    eliminated = latest.squads_eliminated
+    if deployed == 0:
         pass  # sat out the week, no signal
-    elif squads_eliminated == squads_deployed and squads_eliminated > 0:
+    elif eliminated == deployed and eliminated > 0:
         # Total wipe — trauma
         posture.risk_appetite -= RISK_APPETITE_WIPE_PENALTY
-    elif squads_eliminated == 0 and squads_returned == squads_deployed:
+    elif eliminated == 0 and returned == deployed:
         # Clean sweep — hot streak
         posture.risk_appetite += RISK_APPETITE_SWEEP_BONUS
     else:
         # Mixed week — drift based on net return rate sign
-        direction = 1.0 if return_rate >= 0 else -1.0
+        direction = 1.0 if _return_rate(deployed, returned, eliminated) >= 0 else -1.0
         posture.risk_appetite += RISK_APPETITE_STEP * direction
     posture.risk_appetite = max(-1.0, min(1.0, posture.risk_appetite))
 

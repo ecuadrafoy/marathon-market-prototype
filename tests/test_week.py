@@ -383,7 +383,7 @@ class TestRosterEconomyEndToEnd:
         from runner_sim.market.week import simulate_week
         from runner_sim.zone_sim.items import load_items
         from runner_sim.zone_sim.zones import ZONES
-        from runner_sim.market.company_strategy import Loan, PostureState
+        from runner_sim.market.company_strategy import CompanyMemory, Loan, PostureState
 
         @dataclass
         class StubCompany:
@@ -391,6 +391,7 @@ class TestRosterEconomyEndToEnd:
             price: float
             budget: float = 600.0
             posture: PostureState = field(default_factory=PostureState)
+            memory: CompanyMemory = field(default_factory=CompanyMemory)
             loans: list[Loan] = field(default_factory=list)
 
         random.seed(2026)
@@ -462,7 +463,7 @@ class TestRosterEconomyEndToEnd:
         from runner_sim.market.week import simulate_week
         from runner_sim.zone_sim.items import load_items
         from runner_sim.zone_sim.zones import ZONES
-        from runner_sim.market.company_strategy import Loan, PostureState
+        from runner_sim.market.company_strategy import CompanyMemory, Loan, PostureState
 
         @dataclass
         class StubCo:
@@ -470,6 +471,7 @@ class TestRosterEconomyEndToEnd:
             price: float
             budget: float = 600.0
             posture: PostureState = field(default_factory=PostureState)
+            memory: CompanyMemory = field(default_factory=CompanyMemory)
             loans: list[Loan] = field(default_factory=list)
 
         random.seed(7)
@@ -525,7 +527,7 @@ class TestRosterEconomyEndToEnd:
         from dataclasses import dataclass, field
         import random
         from runner_sim.market.calibration import bootstrap_default_state
-        from runner_sim.market.company_strategy import Loan, PostureState
+        from runner_sim.market.company_strategy import CompanyMemory, Loan, PostureState
         from runner_sim.market.week import simulate_week
         from runner_sim.zone_sim.items import load_items
         from runner_sim.zone_sim.zones import ZONES
@@ -536,6 +538,7 @@ class TestRosterEconomyEndToEnd:
             price: float
             budget: float = 600.0
             posture: PostureState = field(default_factory=PostureState)
+            memory: CompanyMemory = field(default_factory=CompanyMemory)
             loans: list[Loan] = field(default_factory=list)
 
         random.seed(2026)

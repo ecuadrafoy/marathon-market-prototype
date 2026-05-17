@@ -11,7 +11,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from runner_sim.market.calibration import bootstrap_default_state
-from runner_sim.market.company_strategy import CompanyRosterEvents, Loan, PostureState
+from runner_sim.market.company_strategy import (
+    CompanyMemory,
+    CompanyRosterEvents,
+    Loan,
+    PostureState,
+)
 from runner_sim.market.pricing import CompanyWeekResult
 from runner_sim.market.roster import all_runners as roster_all_runners
 from runner_sim.market.week import simulate_week
@@ -66,6 +71,7 @@ class Company:
     valuation: float = STARTING_VALUATION          # enterprise value, updated only on quarterly reports
     pending_valuation_delta: float = 0.0           # accumulates between quarters; reset on report
     posture: PostureState = field(default_factory=PostureState)  # strategic posture (momentum + risk_appetite)
+    memory: CompanyMemory = field(default_factory=CompanyMemory)  # rolling per-week + per-zone history
     loans: list[Loan] = field(default_factory=list)  # emergency-financing history (outstanding + repaid)
 
 

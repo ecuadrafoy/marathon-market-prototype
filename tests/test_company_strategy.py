@@ -24,6 +24,7 @@ from runner_sim.market.shell_market import make_initial_market
 from runner_sim.market.company_strategy import (
     BASE_UPKEEP,
     CREDIT_SHARE_TO_COMPANY,
+    CompanyMemory,
     INITIAL_FREE_AGENT_BENCH,
     LOAN_AMOUNT,
     LOAN_REPAY_BUDGET_THRESHOLD,
@@ -31,6 +32,7 @@ from runner_sim.market.company_strategy import (
     LOAN_TRIGGER_BUDGET_THRESHOLD,
     Loan,
     MAX_OUTSTANDING_LOANS,
+    MEMORY_WINDOW_WEEKS,
     MIN_GLOBAL_POOL,
     ORPHAN_RETIRE_AFTER_WEEKS,
     PostureState,
@@ -38,6 +40,7 @@ from runner_sim.market.company_strategy import (
     RISK_APPETITE_SWEEP_BONUS,
     RISK_APPETITE_WIPE_PENALTY,
     RunnerIdCounter,
+    WeekSnapshot,
     auto_repay_loan,
     collect_company_income,
     company_health,
@@ -68,6 +71,54 @@ class FakeCompany:
     budget: float = 0.0
     loans: list = field(default_factory=list)
     posture: PostureState = field(default_factory=PostureState)
+    memory: CompanyMemory = field(default_factory=CompanyMemory)
+
+
+def _snap(
+    week: int = 0,
+    price_change_pct: float = 0.0,
+    squads_deployed: int = 3,
+    squads_returned: int = 2,
+    squads_eliminated: int = 1,
+    per_zone_credits: dict | None = None,
+    per_zone_squads_deployed: dict | None = None,
+    per_zone_squads_eliminated: dict | None = None,
+) -> WeekSnapshot:
+    """Helper: build a WeekSnapshot with defaults that match typical mixed weeks."""
+    return WeekSnapshot(
+        week=week,
+        price_change_pct=price_change_pct,
+        extracted_credits=0.0,
+        squads_deployed=squads_deployed,
+        squads_returned=squads_returned,
+        squads_eliminated=squads_eliminated,
+        per_zone_credits=per_zone_credits or {},
+        per_zone_squads_deployed=per_zone_squads_deployed or {},
+        per_zone_squads_eliminated=per_zone_squads_eliminated or {},
+        deaths=0,
+        budget_delta=0.0,
+        roster_size_after=9,
+    )
+
+
+def _record_and_update(
+    posture: PostureState,
+    memory: CompanyMemory,
+    *,
+    price_change_pct: float,
+    squads_deployed: int,
+    squads_returned: int,
+    squads_eliminated: int,
+) -> None:
+    """Test convenience: record a snapshot then update posture from it."""
+    memory.record(_snap(
+        week=posture.weeks_observed,
+        price_change_pct=price_change_pct,
+        squads_deployed=squads_deployed,
+        squads_returned=squads_returned,
+        squads_eliminated=squads_eliminated,
+    ))
+    update_posture(posture, memory)
 
 
 def _make_runner(
@@ -254,12 +305,23 @@ class TestPostureUpdate:
       - risk_appetite: slow accumulator, asymmetric (wipes 4× sweeps)
     """
 
+    def test_empty_memory_is_noop(self):
+        """update_posture with no recorded snapshots must not mutate posture."""
+        p = PostureState(momentum=0.3, risk_appetite=0.5, weeks_observed=4)
+        mem = CompanyMemory()
+        update_posture(p, mem)
+        assert p.momentum == pytest.approx(0.3)
+        assert p.risk_appetite == pytest.approx(0.5)
+        assert p.weeks_observed == 4
+
     def test_neutral_week_barely_drifts(self):
         """A break-even week (mixed returns at baseline) shouldn't push
         either axis past a small amount."""
         p = PostureState()
-        update_posture(p, price_change_pct=0.0, squads_deployed=3,
-                       squads_returned=2, squads_eliminated=1)
+        mem = CompanyMemory()
+        _record_and_update(p, mem, price_change_pct=0.0, squads_deployed=3,
+                           squads_returned=2, squads_eliminated=1)
+        # With 1 snapshot in memory: avg = this week's value, identical to old behaviour.
         # return_rate = (2-1)/3 = 0.333; this_week = 0.5*0 + 0.5*0.333 = 0.167
         # momentum = 0.7*0 + 0.3*0.167 = 0.05
         assert abs(p.momentum) < 0.10
@@ -270,54 +332,75 @@ class TestPostureUpdate:
     def test_total_wipe_pushes_risk_appetite_negative_by_penalty(self):
         """All squads eliminated → exact −WIPE_PENALTY to risk_appetite."""
         p = PostureState()
-        update_posture(p, price_change_pct=-10.0, squads_deployed=3,
-                       squads_returned=0, squads_eliminated=3)
+        mem = CompanyMemory()
+        _record_and_update(p, mem, price_change_pct=-10.0, squads_deployed=3,
+                           squads_returned=0, squads_eliminated=3)
         assert p.risk_appetite == pytest.approx(-RISK_APPETITE_WIPE_PENALTY)
         assert p.momentum < 0   # also bad momentum
 
     def test_clean_sweep_pushes_risk_appetite_positive_by_bonus(self):
         """All squads returned, none eliminated → exact +SWEEP_BONUS."""
         p = PostureState()
-        update_posture(p, price_change_pct=+10.0, squads_deployed=3,
-                       squads_returned=3, squads_eliminated=0)
+        mem = CompanyMemory()
+        _record_and_update(p, mem, price_change_pct=+10.0, squads_deployed=3,
+                           squads_returned=3, squads_eliminated=0)
         assert p.risk_appetite == pytest.approx(RISK_APPETITE_SWEEP_BONUS)
         assert p.momentum > 0
 
-    def test_momentum_ema_half_life(self):
-        """Applying a strong positive signal repeatedly should approach +1
-        asymptotically; momentum after 5 weeks of +1 ≈ 1 - 0.7^5 ≈ 0.83."""
+    def test_momentum_ema_approaches_one_under_uniform_signal(self):
+        """Applying a strong positive signal repeatedly drives momentum
+        toward +1. With identical snapshots the windowed mean equals the
+        per-week value, so this matches the pre-memory convergence pace."""
         p = PostureState()
+        mem = CompanyMemory()
         for _ in range(5):
-            update_posture(p, price_change_pct=+50.0, squads_deployed=3,
-                           squads_returned=3, squads_eliminated=0)
+            _record_and_update(p, mem, price_change_pct=+50.0, squads_deployed=3,
+                               squads_returned=3, squads_eliminated=0)
         assert p.momentum > 0.7
-        # Then decay: 5 neutral weeks should pull momentum back below 0.3
+
+    def test_momentum_decay_under_mixed_history(self):
+        """The 6-week window smooths the per-week input — momentum decays
+        more slowly than the bare-EMA model. After 5 hot weeks then 5
+        neutral, the window still carries some warmth so momentum should
+        decay BUT not all the way back to zero in just 5 weeks."""
+        p = PostureState()
+        mem = CompanyMemory()
         for _ in range(5):
-            update_posture(p, price_change_pct=0.0, squads_deployed=3,
-                           squads_returned=2, squads_eliminated=1)
-        assert p.momentum < 0.5  # decayed significantly
+            _record_and_update(p, mem, price_change_pct=+50.0, squads_deployed=3,
+                               squads_returned=3, squads_eliminated=0)
+        peak_momentum = p.momentum
+        for _ in range(5):
+            _record_and_update(p, mem, price_change_pct=0.0, squads_deployed=3,
+                               squads_returned=2, squads_eliminated=1)
+        # Decay HAS happened (window is now mostly neutral after 5 weeks).
+        assert p.momentum < peak_momentum
+        # But residual warmth from the windowed mean keeps it above neutral.
+        assert p.momentum > 0.0
 
     def test_risk_appetite_clamped_at_negative_one(self):
         """Many wipes shouldn't push risk_appetite below −1.0."""
         p = PostureState()
+        mem = CompanyMemory()
         for _ in range(100):
-            update_posture(p, price_change_pct=-10.0, squads_deployed=3,
-                           squads_returned=0, squads_eliminated=3)
+            _record_and_update(p, mem, price_change_pct=-10.0, squads_deployed=3,
+                               squads_returned=0, squads_eliminated=3)
         assert p.risk_appetite == pytest.approx(-1.0)
 
     def test_risk_appetite_clamped_at_positive_one(self):
         """Many sweeps shouldn't push risk_appetite above +1.0."""
         p = PostureState()
+        mem = CompanyMemory()
         for _ in range(100):
-            update_posture(p, price_change_pct=+10.0, squads_deployed=3,
-                           squads_returned=3, squads_eliminated=0)
+            _record_and_update(p, mem, price_change_pct=+10.0, squads_deployed=3,
+                               squads_returned=3, squads_eliminated=0)
         assert p.risk_appetite == pytest.approx(1.0)
 
     def test_sitting_out_week_does_not_drift_risk_appetite(self):
         """squads_deployed=0 means no signal — risk_appetite stays put."""
         p = PostureState(risk_appetite=+0.5)
-        update_posture(p, price_change_pct=0.0, squads_deployed=0,
-                       squads_returned=0, squads_eliminated=0)
+        mem = CompanyMemory()
+        _record_and_update(p, mem, price_change_pct=0.0, squads_deployed=0,
+                           squads_returned=0, squads_eliminated=0)
         assert p.risk_appetite == pytest.approx(0.5)
         # Momentum still drifts toward 0 (price_signal=0, return_rate=0)
         assert p.weeks_observed == 1

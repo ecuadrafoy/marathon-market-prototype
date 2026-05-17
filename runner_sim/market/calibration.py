@@ -32,6 +32,7 @@ from runner_sim.market.roster import (
 )
 from runner_sim.market.shell_market import ShellMarket, make_initial_market, update_prices
 from runner_sim.market.company_strategy import (
+    CompanyMemory,
     INITIAL_FREE_AGENT_BENCH,
     Loan,
     PostureState,
@@ -62,6 +63,7 @@ class _CalibCompany:
     valuation: float = 0.0
     pending_valuation_delta: float = 0.0
     posture: PostureState = field(default_factory=PostureState)
+    memory: CompanyMemory = field(default_factory=CompanyMemory)
     loans: list[Loan] = field(default_factory=list)
 
 

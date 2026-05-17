@@ -80,6 +80,16 @@ _ZONE_SAFETY: dict[str, float] = {
 # same pairing every week.
 _NEUTRAL_TIEBREAK_JITTER = 0.05
 
+# Per-zone memory bias range. Multiplicative factor applied AFTER posture math
+# so a brutally bad recent run at one zone can dampen its score; a fertile run
+# can boost it. Clamped to keep memory from overriding posture entirely.
+_MEMORY_FACTOR_MIN = 0.6
+_MEMORY_FACTOR_MAX = 1.2
+# Per-zone average credits at or above this point pulls factor toward MAX.
+# Anchored to BASE_EXPECTATION (~120cr/squad) — a zone delivering ~1.5× the
+# typical squad take counts as "fertile."
+_MEMORY_CREDIT_PIVOT = 180.0
+
 
 # ---------------------------------------------------------------------------
 # SQUAD NAMING
@@ -102,25 +112,51 @@ def _doctrine_sort_key(runner) -> tuple[int, int]:
     return (_DOCTRINE_RANK[doctrine], runner.id)
 
 
-def _match_score(doctrine: Doctrine, zone_name: str, posture) -> float:
-    """Score a (doctrine, zone) pair given the company's posture.
+def _memory_factor(memory, zone_name: str) -> float:
+    """Per-zone multiplicative bias derived from rolling history.
+
+    No memory or zone never visited in the window → 1.0 (neutral).
+    High recent elimination rate → factor drops toward _MEMORY_FACTOR_MIN.
+    High recent average credits → factor rises toward _MEMORY_FACTOR_MAX.
+    The two effects compose: a profitable but dangerous zone lands near 1.0
+    (boost cancels penalty), modeling "we keep going because the loot is
+    worth it." A barren-and-dangerous zone gets dampened twice.
+    """
+    if memory is None or not memory.snapshots:
+        return 1.0
+    elim_rate = memory.per_zone_elimination_rate(zone_name)
+    avg_credits = memory.per_zone_avg_credits(zone_name)
+    # Elimination penalty: linear from 1.0 at 0% elim → MIN at 100% elim.
+    elim_penalty = elim_rate * (1.0 - _MEMORY_FACTOR_MIN)
+    # Credit bonus: linear from 0 at 0 credits → (MAX - 1.0) at the pivot+.
+    credit_ratio = min(1.0, avg_credits / _MEMORY_CREDIT_PIVOT) if _MEMORY_CREDIT_PIVOT > 0 else 0.0
+    credit_bonus = credit_ratio * (_MEMORY_FACTOR_MAX - 1.0)
+    factor = 1.0 - elim_penalty + credit_bonus
+    return max(_MEMORY_FACTOR_MIN, min(_MEMORY_FACTOR_MAX, factor))
+
+
+def _match_score(doctrine: Doctrine, zone_name: str, posture, memory=None) -> float:
+    """Score a (doctrine, zone) pair given posture and (optionally) memory.
 
     base[doctrine][zone]          — intrinsic fit (e.g. GREEDY peaks in Outpost)
     − risk_appetite × safety[zone] — defensive postures gain in safe zones
     + 0.1 × momentum × safety[zone] × −1
                                   — hot streaks tilt slightly toward gambles too
+    × _memory_factor(memory, zone) — recent per-zone history; 1.0 when no memory.
     """
     base = _DOCTRINE_ZONE_BASE.get(doctrine, {}).get(zone_name, 0.5)
     safety = _ZONE_SAFETY.get(zone_name, 0.0)
     posture_bias = -posture.risk_appetite * safety
     momentum_kicker = 0.1 * posture.momentum * safety * -1
-    return base + posture_bias + momentum_kicker
+    posture_score = base + posture_bias + momentum_kicker
+    return posture_score * _memory_factor(memory, zone_name)
 
 
 def assign_squads(
     roster: CompanyRoster,
     zones: list[Zone],
     posture=None,
+    memory=None,
     rng: random.Random | None = None,
 ) -> dict[str, Squad]:
     """Group runners into squads and assign one per zone.
@@ -129,11 +165,15 @@ def assign_squads(
 
     Two modes:
       • posture=None — legacy: id-sort + random zone shuffle. Used by
-        calibration mode (which has no Company objects).
+        calibration mode (which has no Company objects). memory is ignored.
       • posture=PostureState — doctrine-clustering composition + greedy
         posture-driven zone matching. The intended doctrine actually
         forms; defensive companies hold Perimeter, aggressive ones
         gamble GREEDY in Outpost.
+
+    When memory is provided alongside posture, _memory_factor biases each
+    zone score by recent per-zone elimination + credit history (soft
+    multiplicative bias in [0.6, 1.2]). memory=None reads as neutral.
 
     Precondition: MIN_ROSTER_FOR_DEPLOYMENT <= len(roster.runners) <= 9
                   and len(zones) == 3.
@@ -188,7 +228,7 @@ def assign_squads(
     score_table: dict[tuple[int, str], float] = {}
     for i, doctrine in enumerate(chunk_doctrines):
         for zone_name in available_zone_names:
-            score = _match_score(doctrine, zone_name, posture)
+            score = _match_score(doctrine, zone_name, posture, memory)
             score += rng.uniform(0, _NEUTRAL_TIEBREAK_JITTER)
             score_table[(i, zone_name)] = score
 

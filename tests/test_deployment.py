@@ -213,3 +213,140 @@ class TestPostureDeployment:
         assert all_deployed_ids == sorted(r.id for r in roster.runners)
         # All 3 zones get a squad
         assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# Memory-driven per-zone bias
+# ---------------------------------------------------------------------------
+from runner_sim.market.company_strategy import CompanyMemory, WeekSnapshot
+from runner_sim.market.deployment import _match_score, _memory_factor
+
+
+def _wipe_snapshot(zone: str, week: int = 0) -> WeekSnapshot:
+    """A snapshot where the company deployed to `zone` and was wiped there."""
+    return WeekSnapshot(
+        week=week,
+        price_change_pct=-10.0,
+        extracted_credits=0.0,
+        squads_deployed=3, squads_returned=2, squads_eliminated=1,
+        per_zone_credits={zone: 0.0},
+        per_zone_squads_deployed={zone: 1},
+        per_zone_squads_eliminated={zone: 1},
+        deaths=3, budget_delta=-50.0, roster_size_after=6,
+    )
+
+
+def _fertile_snapshot(zone: str, credits: float, week: int = 0) -> WeekSnapshot:
+    """A snapshot where the company deployed to `zone` and extracted big."""
+    return WeekSnapshot(
+        week=week,
+        price_change_pct=+10.0,
+        extracted_credits=credits,
+        squads_deployed=3, squads_returned=3, squads_eliminated=0,
+        per_zone_credits={zone: credits},
+        per_zone_squads_deployed={zone: 1},
+        per_zone_squads_eliminated={zone: 0},
+        deaths=0, budget_delta=+200.0, roster_size_after=9,
+    )
+
+
+class TestMemoryFactor:
+    def test_neutral_when_memory_is_none(self):
+        assert _memory_factor(None, "Outpost") == 1.0
+
+    def test_neutral_when_memory_is_empty(self):
+        assert _memory_factor(CompanyMemory(), "Outpost") == 1.0
+
+    def test_neutral_when_zone_not_in_window(self):
+        m = CompanyMemory()
+        m.record(_fertile_snapshot("Perimeter", credits=300.0))
+        assert _memory_factor(m, "Outpost") == 1.0
+
+    def test_full_wipes_drop_factor_below_one(self):
+        m = CompanyMemory()
+        for w in range(4):
+            m.record(_wipe_snapshot("Outpost", week=w))
+        assert _memory_factor(m, "Outpost") < 1.0
+
+    def test_fertile_history_lifts_factor_above_one(self):
+        m = CompanyMemory()
+        for w in range(4):
+            m.record(_fertile_snapshot("Perimeter", credits=400.0, week=w))
+        assert _memory_factor(m, "Perimeter") > 1.0
+
+    def test_factor_clamped(self):
+        """Even with extreme history the factor stays within [0.6, 1.2]."""
+        m = CompanyMemory()
+        for w in range(6):
+            m.record(_wipe_snapshot("Outpost", week=w))
+        f = _memory_factor(m, "Outpost")
+        assert 0.6 <= f <= 1.2
+
+
+class TestDeploymentMemoryBias:
+    def _make_roster(self, size: int = STARTING_ROSTER_SIZE):
+        market = make_initial_market()
+        used: set[str] = set()
+        roster = create_roster("TestCo", market, used)
+        if size != STARTING_ROSTER_SIZE:
+            roster.runners = roster.runners[:size]
+        return roster
+
+    def test_outpost_wipe_history_biases_greedy_squad_away(self):
+        """With 4 weeks of Outpost wipes in memory, a GREEDY-heavy roster
+        with neutral posture should place GREEDY in Outpost less often
+        than the no-memory baseline."""
+        roster = self._make_roster(size=9)
+        _stamp_shell(roster, [
+            "Destroyer", "Destroyer", "Destroyer",   # GREEDY
+            "Recon", "Recon", "Recon",                # CAUTIOUS
+            "Vandal", "Vandal", "Vandal",             # BALANCED
+        ])
+
+        baseline_count = 0
+        for seed in range(20):
+            result = assign_squads(roster, ZONES,
+                                   posture=PostureState(),
+                                   memory=None,
+                                   rng=random.Random(seed))
+            outpost = result.get("Outpost")
+            if outpost and outpost.doctrine == Doctrine.GREEDY:
+                baseline_count += 1
+
+        m = CompanyMemory()
+        for w in range(4):
+            m.record(_wipe_snapshot("Outpost", week=w))
+
+        memory_count = 0
+        for seed in range(20):
+            result = assign_squads(roster, ZONES,
+                                   posture=PostureState(),
+                                   memory=m,
+                                   rng=random.Random(seed))
+            outpost = result.get("Outpost")
+            if outpost and outpost.doctrine == Doctrine.GREEDY:
+                memory_count += 1
+
+        # Memory should pull GREEDY out of Outpost at least some of the time
+        # vs. the no-memory baseline.
+        assert memory_count < baseline_count, (
+            f"memory bias did not move GREEDY off Outpost: "
+            f"baseline={baseline_count}, with-memory={memory_count}"
+        )
+
+    def test_match_score_responds_to_memory_bias(self):
+        """Direct: _match_score for the same (doctrine, zone) should drop
+        when that zone has a wipe history, and rise when fertile."""
+        baseline = _match_score(Doctrine.GREEDY, "Outpost", PostureState(), memory=None)
+
+        wipe_mem = CompanyMemory()
+        for w in range(4):
+            wipe_mem.record(_wipe_snapshot("Outpost", week=w))
+        wiped = _match_score(Doctrine.GREEDY, "Outpost", PostureState(), memory=wipe_mem)
+
+        fertile_mem = CompanyMemory()
+        for w in range(4):
+            fertile_mem.record(_fertile_snapshot("Outpost", credits=400.0, week=w))
+        fertile = _match_score(Doctrine.GREEDY, "Outpost", PostureState(), memory=fertile_mem)
+
+        assert wiped < baseline < fertile
